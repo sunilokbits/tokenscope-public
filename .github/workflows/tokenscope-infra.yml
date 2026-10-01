@@ -1,0 +1,137 @@
+# TokenScope infrastructure (Bicep) — example workflow.
+# Copy to .github/workflows/ in your fork. Setup: examples/github-actions/README.md.
+#
+# Applies infra/main.bicep with your committed parameter file. The parameter
+# file reads every secret from environment variables (readEnvironmentVariable),
+# so this workflow maps the GitHub environment's secrets onto those names.
+#
+# Fork changes from examples/github-actions/tokenscope-infra.yml (the resource
+# group is shared with unrelated workloads):
+#   - the deployment is named TOKENSCOPE_DEPLOYMENT_NAME (default `main`), so it
+#     cannot collide with another deployment called `main`;
+#   - identifiers the parameter file reads (ENTRA_TENANT_ID, ENTRA_CLIENT_ID,
+#     BOOTSTRAP_ADMIN_EMAIL, TOKENSCOPE_PUBLIC_ORIGIN, ALERT_NOTIFICATION_EMAIL)
+#     come from environment variables, so none is committed to the public fork.
+name: TokenScope infra
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment holding this deployment's secrets and variables
+        required: true
+        default: sandbox
+      mode:
+        description: what-if previews only; apply deploys
+        type: choice
+        options: [what-if, apply]
+        default: what-if
+      params:
+        description: Parameter file; empty = the environment's TOKENSCOPE_PARAMS
+        required: false
+        default: ''
+  # Lets another workflow run this one (a pipeline, or a validation run).
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      mode:
+        type: string
+        default: what-if
+      params:
+        type: string
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+# Shared with the deploy workflow: an apply resets the app to `latest`, so the
+# two must not overlap.
+concurrency:
+  group: tokenscope-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  infra:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+      PARAMS: ${{ inputs.params || vars.TOKENSCOPE_PARAMS }}
+      DEPLOYMENT: ${{ vars.TOKENSCOPE_DEPLOYMENT_NAME || 'main' }}
+      # Non-secret identifiers read by infra/parameters/sandbox.bicepparam.
+      ENTRA_TENANT_ID: ${{ vars.ENTRA_TENANT_ID }}
+      ENTRA_CLIENT_ID: ${{ vars.ENTRA_CLIENT_ID }}
+      BOOTSTRAP_ADMIN_EMAIL: ${{ vars.BOOTSTRAP_ADMIN_EMAIL }}
+      TOKENSCOPE_PUBLIC_ORIGIN: ${{ vars.TOKENSCOPE_PUBLIC_ORIGIN }}
+      ALERT_NOTIFICATION_EMAIL: ${{ vars.ALERT_NOTIFICATION_EMAIL }}
+      # Required by the example parameter files.
+      PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
+      PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
+      SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+      HMAC_SESSION_KEY: ${{ secrets.HMAC_SESSION_KEY }}
+      INTERNAL_WORKER_HMAC_KEY: ${{ secrets.INTERNAL_WORKER_HMAC_KEY }}
+      OIDC_SESSION_SECRET: ${{ secrets.OIDC_SESSION_SECRET }}
+      OIDC_AUTH_SESSION_SECRET: ${{ secrets.OIDC_AUTH_SESSION_SECRET }}
+      OIDC_TOKEN_KEY: ${{ secrets.OIDC_TOKEN_KEY }}
+      ENTRA_CLIENT_SECRET: ${{ secrets.ENTRA_CLIENT_SECRET }}
+      # Optional provider credentials; unset = not configured.
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_PAT_PARTNER_DEMO: ${{ secrets.GH_PAT_PARTNER_DEMO }}
+      GH_PAT_PRODUCTION: ${{ secrets.GH_PAT_PRODUCTION }}
+      GH_PAT_ENTERPRISE_NFR: ${{ secrets.GH_PAT_ENTERPRISE_NFR }}
+      GH_APP_KEY_PARTNER_DEMO: ${{ secrets.GH_APP_KEY_PARTNER_DEMO }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check configuration
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          missing=""
+          for v in RG PARAMS PG_ADMIN_LOGIN PG_ADMIN_PASSWORD SESSION_SECRET HMAC_SESSION_KEY \
+                   INTERNAL_WORKER_HMAC_KEY OIDC_SESSION_SECRET OIDC_AUTH_SESSION_SECRET \
+                   OIDC_TOKEN_KEY ENTRA_CLIENT_SECRET; do
+            [ -n "$(printenv "$v")" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Not set in the '$ENVIRONMENT' environment:$missing"
+            exit 1
+          fi
+          [ -f "$PARAMS" ] || { echo "::error::Parameter file $PARAMS is not in the repository"; exit 1; }
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Compile parameters
+        run: az bicep build-params --file "$PARAMS" --stdout > /dev/null
+
+      - name: What-if
+        run: |
+          az deployment group what-if --resource-group "$RG" --name "$DEPLOYMENT" \
+            --template-file infra/main.bicep --parameters "$PARAMS" \
+            --result-format ResourceIdOnly
+
+      - name: Apply
+        if: inputs.mode == 'apply'
+        # Started without waiting so the script below can approve Front Door
+        # Premium's Private Link request while the apply runs: the Front Door
+        # origin does not finish until it is approved. For any other posture
+        # the script just waits for the deployment and reports its result.
+        run: |
+          az deployment group create --resource-group "$RG" --name "$DEPLOYMENT" \
+            --template-file infra/main.bicep --parameters "$PARAMS" --no-wait
+          rc=0
+          bash infra/scripts/approve-front-door-private-link.sh "$RG" "$DEPLOYMENT" || rc=$?
+          if [ "$rc" = 3 ]; then
+            echo "::notice::First apply: the Container App waits for its image. Run TokenScope deploy, then apply again to create what depends on the app (alerts, worker jobs, Front Door)."
+            exit 0
+          fi
+          [ "$rc" = 0 ] || exit "$rc"
+          echo "::notice::containerAppUrl = $(az deployment group show -g "$RG" -n "$DEPLOYMENT" \
+            --query properties.outputs.containerAppUrl.value -o tsv)"

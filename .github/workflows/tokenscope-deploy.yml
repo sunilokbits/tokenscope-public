@@ -1,0 +1,239 @@
+# TokenScope image build + roll — example workflow.
+# Copy to .github/workflows/ in your fork. Setup: examples/github-actions/README.md.
+#
+# Builds the image under the commit tag, rolls the Container App to it, waits
+# until that commit is the one serving, and only then moves `latest` (which the
+# worker jobs and every infra apply use). On failure it rolls the app back to
+# the image it was running before, pinned by digest, and leaves `latest` alone.
+#
+# Fork change from examples/github-actions/tokenscope-deploy.yml: the resource
+# group is shared with unrelated workloads (several registries), so the
+# registry and Container App are named by TOKENSCOPE_ACR_NAME and
+# TOKENSCOPE_APP_NAME. Unset, it falls back to the only one in the group and
+# refuses to guess when there is more than one.
+name: TokenScope deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: GitHub environment holding this deployment's secrets and variables
+        required: true
+        default: sandbox
+      build:
+        description: >-
+          acr-task = build in Azure (public registry: sandbox);
+          docker = docker build + push on the runner below (private registry, runner inside the network);
+          acr-agent-pool = build in a registry agent pool inside the network (private registry);
+          prebuilt = no build, your own pipeline already pushed tokenscope:<12-character commit SHA>
+        type: choice
+        options: [acr-task, docker, acr-agent-pool, prebuilt]
+        default: acr-task
+      runner:
+        description: Runner label; a self-hosted runner inside the network for docker builds
+        required: true
+        default: ubuntu-latest
+  # Lets another workflow run this one (a pipeline, or a validation run).
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      build:
+        type: string
+        default: acr-task
+      runner:
+        type: string
+        default: ubuntu-latest
+
+permissions:
+  id-token: write
+  contents: read
+
+# Shared with the infra workflow: an apply resets the app to `latest`, so the
+# two must not overlap.
+concurrency:
+  group: tokenscope-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ${{ inputs.runner }}
+    environment: ${{ inputs.environment }}
+    env:
+      RG: ${{ vars.AZURE_RESOURCE_GROUP }}
+      HEALTH_URL: ${{ vars.TOKENSCOPE_HEALTH_URL }}
+      AGENT_POOL: ${{ vars.TOKENSCOPE_ACR_AGENT_POOL }}
+      ACR_NAME: ${{ vars.TOKENSCOPE_ACR_NAME }}
+      APP_NAME: ${{ vars.TOKENSCOPE_APP_NAME }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Resolve resources
+        id: res
+        env:
+          BUILD: ${{ inputs.build }}
+        run: |
+          [ -n "$RG" ] || { echo "::error::AZURE_RESOURCE_GROUP is not set"; exit 1; }
+          case "$BUILD" in
+            acr-task|docker|acr-agent-pool|prebuilt) ;;
+            *) echo "::error::Unknown build '$BUILD'"; exit 1 ;;
+          esac
+          # Named explicitly, or the only one of its kind in the resource group.
+          only() {
+            local n; n=$(printf '%s\n' "$2" | grep -c . || true)
+            [ "$n" -le 1 ] || { echo "::error::$n $1 in $RG; set $3 to the TokenScope one" >&2; return 1; }
+            printf '%s' "$2"
+          }
+          ACR="$ACR_NAME"
+          [ -n "$ACR" ] || ACR=$(only registries "$(az acr list -g "$RG" --query "[].name" -o tsv)" TOKENSCOPE_ACR_NAME)
+          APP="$APP_NAME"
+          [ -n "$APP" ] || APP=$(only "Container Apps" "$(az containerapp list -g "$RG" --query "[].name" -o tsv)" TOKENSCOPE_APP_NAME)
+          [ -n "$ACR" ] && [ -n "$APP" ] || { echo "::error::No registry or Container App in $RG: run the infra workflow first"; exit 1; }
+          az acr show -n "$ACR" -g "$RG" --query name -o tsv > /dev/null || { echo "::error::Registry $ACR not found in $RG: run the infra workflow first"; exit 1; }
+          az containerapp show -n "$APP" -g "$RG" --query name -o tsv > /dev/null || { echo "::error::Container App $APP not found in $RG: run the infra workflow first"; exit 1; }
+          # The image running now, the rollback target. Pinned by digest where
+          # the registry is readable from this runner; a private registry is
+          # not, and the tag is then safe too: deploys run unique commit tags,
+          # and `latest` only moves after a verified deploy.
+          CUR=$(az containerapp show -g "$RG" -n "$APP" --query "properties.template.containers[0].image" -o tsv 2>/dev/null || true)
+          PREV="$CUR"
+          case "$CUR" in
+            "$ACR.azurecr.io/tokenscope:"*)
+              DIGEST=$(az acr repository show -n "$ACR" --image "tokenscope:${CUR##*:}" --query digest -o tsv 2>/dev/null || true)
+              if [ -n "$DIGEST" ]; then PREV="$ACR.azurecr.io/tokenscope@$DIGEST"
+              else echo "::notice::Registry not readable from this runner; rollback target is the tag $CUR"; fi ;;
+          esac
+          {
+            echo "acr=$ACR"
+            echo "app=$APP"
+            echo "tag=$(git rev-parse --short=12 HEAD)"
+            echo "prev=$PREV"
+          } >> "$GITHUB_OUTPUT"
+          echo "Previous image: ${PREV:-none}"
+
+      - name: Build (ACR task)
+        if: inputs.build == 'acr-task'
+        env:
+          ACR: ${{ steps.res.outputs.acr }}
+          TAG: ${{ steps.res.outputs.tag }}
+        run: |
+          az acr build --registry "$ACR" --image "tokenscope:$TAG" \
+            --build-arg GIT_COMMIT_SHA="$GITHUB_SHA" --file Dockerfile .
+
+      - name: Build (ACR agent pool)
+        if: inputs.build == 'acr-agent-pool'
+        env:
+          ACR: ${{ steps.res.outputs.acr }}
+          TAG: ${{ steps.res.outputs.tag }}
+        run: |
+          [ -n "$AGENT_POOL" ] || { echo "::error::TOKENSCOPE_ACR_AGENT_POOL is not set"; exit 1; }
+          az acr build --registry "$ACR" --agent-pool "$AGENT_POOL" --image "tokenscope:$TAG" \
+            --build-arg GIT_COMMIT_SHA="$GITHUB_SHA" --file Dockerfile .
+
+      - name: Build (docker on this runner)
+        if: inputs.build == 'docker'
+        env:
+          ACR: ${{ steps.res.outputs.acr }}
+          TAG: ${{ steps.res.outputs.tag }}
+        run: |
+          az acr login --name "$ACR"
+          docker build --build-arg GIT_COMMIT_SHA="$GITHUB_SHA" -t "$ACR.azurecr.io/tokenscope:$TAG" .
+          docker push "$ACR.azurecr.io/tokenscope:$TAG"
+
+      - name: Roll
+        id: roll
+        env:
+          ACR: ${{ steps.res.outputs.acr }}
+          APP: ${{ steps.res.outputs.app }}
+          TAG: ${{ steps.res.outputs.tag }}
+        run: az containerapp update -g "$RG" -n "$APP" --image "$ACR.azurecr.io/tokenscope:$TAG" --output none
+
+      - name: Verify the new build is serving
+        id: verify
+        env:
+          ACR: ${{ steps.res.outputs.acr }}
+          APP: ${{ steps.res.outputs.app }}
+          TAG: ${{ steps.res.outputs.tag }}
+        run: |
+          # Azure's API can answer a read with a 5xx for a moment; retry each
+          # read before treating it as a failure.
+          azr() { local i; for i in 1 2 3; do az "$@" && return 0; sleep 15; done; return 1; }
+          # 1. Azure's view, which needs no network path to the app: the newest
+          #    revision runs this build, its /api/health probes pass, and it is
+          #    the ready revision. A crash-looping build never gets there.
+          ok=""
+          for i in $(seq 1 20); do
+            LATEST=$(azr containerapp show -g "$RG" -n "$APP" --query properties.latestRevisionName -o tsv)
+            READY=$(azr containerapp show -g "$RG" -n "$APP" --query properties.latestReadyRevisionName -o tsv)
+            IMG=$(azr containerapp revision show -g "$RG" -n "$APP" --revision "$LATEST" \
+              --query "properties.template.containers[0].image" -o tsv)
+            HEALTH=$(azr containerapp revision show -g "$RG" -n "$APP" --revision "$LATEST" \
+              --query properties.healthState -o tsv)
+            if [ "$IMG" = "$ACR.azurecr.io/tokenscope:$TAG" ] && [ "$HEALTH" = "Healthy" ] && [ "$READY" = "$LATEST" ]; then
+              ok=1; echo "Revision $LATEST runs $TAG and is healthy"; break
+            fi
+            echo "Attempt $i: revision $LATEST image ${IMG##*/} health ${HEALTH:-?} ready ${READY:-?}"
+            sleep 30
+          done
+          [ -n "$ok" ] || { echo "::error::The new revision did not become healthy"; exit 1; }
+
+          # 2. End to end over HTTP, through the address users reach:
+          #    TOKENSCOPE_HEALTH_URL if set, else the app's configured public
+          #    origin (APP_PUBLIC_ORIGIN: the Front Door or WAF host), else the
+          #    app's own address when its environment is not internal. With
+          #    Front Door enforcing, the app's own address refuses everything
+          #    but /api/health, so the public origin is the one to check.
+          BASE="$HEALTH_URL"
+          if [ -z "$BASE" ]; then
+            BASE=$(azr containerapp show -g "$RG" -n "$APP" \
+              --query "properties.template.containers[0].env[?name=='APP_PUBLIC_ORIGIN'].value | [0]" -o tsv)
+          fi
+          if [ -z "$BASE" ]; then
+            ENV_ID=$(azr containerapp show -g "$RG" -n "$APP" --query properties.managedEnvironmentId -o tsv)
+            INTERNAL=$(azr containerapp env show --ids "$ENV_ID" --query properties.vnetConfiguration.internal -o tsv)
+            [ "$INTERNAL" = "true" ] || BASE="https://$(azr containerapp show -g "$RG" -n "$APP" \
+              --query properties.configuration.ingress.fqdn -o tsv)"
+          fi
+          if [ -z "$BASE" ]; then
+            echo "::notice::Internal environment with no public origin or TOKENSCOPE_HEALTH_URL: verified through Azure only"
+            exit 0
+          fi
+          for i in $(seq 1 10); do
+            # A failed curl must not end the step (it matters if the shell is set to pipefail).
+            commit=$(curl -s --max-time 10 "$BASE/api/v1/meta/build" | sed -n 's/.*"commit":"\([0-9a-f]*\)".*/\1/p' || true)
+            health=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 "$BASE/api/health" || true)
+            if [ -n "$commit" ] && [ "${GITHUB_SHA#"$commit"}" != "$GITHUB_SHA" ] && [ "$health" = "200" ]; then
+              echo "::notice::$BASE is serving $commit and healthy"
+              exit 0
+            fi
+            echo "Attempt $i: $BASE commit '${commit:-?}', health $health"
+            sleep 30
+          done
+          echo "::error::$BASE did not serve commit $GITHUB_SHA healthily"
+          exit 1
+
+      - name: Promote to latest
+        env:
+          ACR: ${{ steps.res.outputs.acr }}
+          TAG: ${{ steps.res.outputs.tag }}
+        run: |
+          az acr import --name "$ACR" --source "$ACR.azurecr.io/tokenscope:$TAG" \
+            --image tokenscope:latest --force
+
+      - name: Roll back to the previous image
+        # After a failed roll or a failed verification; not after a failed
+        # promotion, when the new build is already verified and serving.
+        if: failure() && (steps.roll.outcome == 'failure' || steps.verify.outcome == 'failure') && steps.res.outputs.prev != ''
+        env:
+          APP: ${{ steps.res.outputs.app }}
+          PREV: ${{ steps.res.outputs.prev }}
+        run: |
+          az containerapp update -g "$RG" -n "$APP" --image "$PREV" --output none
+          echo "::warning::Rolled back to $PREV; latest was not moved"
