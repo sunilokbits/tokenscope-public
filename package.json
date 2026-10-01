@@ -84,7 +84,7 @@
     "happy-dom": "^20.14.0",
     "playwright-chromium": "^1.63.0",
     "prettier": "^3.9.6",
-    "typescript": "^5.7.0",
+    "typescript": "^7.0.2",
     "vitest": "^5.0.0",
     "vue-tsc": "^3.3.10"
   },
