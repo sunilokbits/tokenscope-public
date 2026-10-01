@@ -83,7 +83,7 @@
     "eslint": "^10.10.0",
     "happy-dom": "^20.14.0",
     "playwright-chromium": "^1.63.0",
-    "prettier": "^3.9.6",
+    "prettier": "^3.9.9",
     "typescript": "^5.7.0",
     "vitest": "^5.0.0",
     "vue-tsc": "^3.3.10"
