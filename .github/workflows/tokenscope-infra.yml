@@ -67,6 +67,8 @@ jobs:
       BOOTSTRAP_ADMIN_EMAIL: ${{ vars.BOOTSTRAP_ADMIN_EMAIL }}
       TOKENSCOPE_PUBLIC_ORIGIN: ${{ vars.TOKENSCOPE_PUBLIC_ORIGIN }}
       ALERT_NOTIFICATION_EMAIL: ${{ vars.ALERT_NOTIFICATION_EMAIL }}
+      # 'false' when this identity cannot write role assignments (Contributor).
+      TOKENSCOPE_DEPLOY_RBAC: ${{ vars.TOKENSCOPE_DEPLOY_RBAC || 'true' }}
       # Required by the example parameter files.
       PG_ADMIN_LOGIN: ${{ secrets.PG_ADMIN_LOGIN }}
       PG_ADMIN_PASSWORD: ${{ secrets.PG_ADMIN_PASSWORD }}
