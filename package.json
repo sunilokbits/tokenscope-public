@@ -79,7 +79,7 @@
     "@types/node": "^26.5.0",
     "@vitejs/plugin-vue": "^6.0.9",
     "@vue/test-utils": "^2.5.0",
-    "drizzle-kit": "^0.31.10",
+    "drizzle-kit": "^0.31.11",
     "eslint": "^10.10.0",
     "happy-dom": "^20.14.0",
     "playwright-chromium": "^1.63.0",
