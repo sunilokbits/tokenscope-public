@@ -4,8 +4,8 @@ Fork-specific runbook for deploying this fork to:
 
 |                    |                                                                                              |
 | ------------------ | -------------------------------------------------------------------------------------------- |
-| Subscription       | Visual Studio Enterprise Subscription (GitHub secret `AZURE_SUBSCRIPTION_ID`)                |
-| Resource group     | `rg-tokenscope-sandbox-wus3` (West US 3, dedicated to this deployment)                       |
+| Subscription       | `Sub_IT_Global_Sandbox_001` (GitHub secret `AZURE_SUBSCRIPTION_ID`)                          |
+| Resource group     | `rg-westus3-t1-services-sandbox-Rakesh-001` (West US 3, **shared** with unrelated workloads) |
 | Posture            | Sandbox: public endpoints, no VNet, no Front Door ([DEPLOY-AZURE.md §3](../DEPLOY-AZURE.md)) |
 | Parameter file     | `infra/parameters/sandbox.bicepparam`                                                        |
 | Workflows          | `.github/workflows/tokenscope-infra.yml`, `.github/workflows/tokenscope-deploy.yml`          |
@@ -20,28 +20,45 @@ read those for the why. This page is the exact what, for this target.
 One Azure Container App (the Nuxt app, port 3000, `/api/health` probes) on a
 workload-profiles Container Apps environment (Consumption profile), plus:
 
-| Resource                                                | Name                                                         |
-| ------------------------------------------------------- | ------------------------------------------------------------ |
-| User-assigned managed identity                          | `id-tssunil-sandbox-wus3`                                    |
-| Container Apps environment / app                        | `cae-tssunil-sandbox-wus3` / `ca-tssunil-sandbox-wus3`       |
-| Container Registry (Basic)                              | `crtssunilsandboxwus3`                                       |
-| Key Vault (RBAC)                                        | `kv-tssunil-sandbox-wus3`                                    |
-| PostgreSQL Flexible Server (B2s) + db `tokenscope`      | `pg-tssunil-sandbox-wus3`                                    |
-| Azure Cache for Redis (Basic)                           | `redis-tssunil-sandbox-wus3`                                 |
-| Log Analytics / Application Insights                    | `log-tssunil-sandbox-wus3` / `appi-tssunil-sandbox-wus3`     |
-| OTLP ingest: Data Collection Endpoint + Rule            | `dce-tssunil-sandbox-wus3` / `dcr-tssunil-sandbox-wus3-otlp` |
-| Metric + log alerts, scheduled worker jobs (`caj-ts-*`) | created on the second apply                                  |
+| Resource                                                | Name                                                       |
+| ------------------------------------------------------- | ---------------------------------------------------------- |
+| User-assigned managed identity                          | `id-tscope-sandbox-wus3`                                   |
+| Container Apps environment / app                        | `cae-tscope-sandbox-wus3` / `ca-tscope-sandbox-wus3`       |
+| Container Registry (Basic)                              | `crtscopesandboxwus3`                                      |
+| Key Vault (RBAC)                                        | `kv-tscope-sandbox-wus3`                                   |
+| PostgreSQL Flexible Server (B2s) + db `tokenscope`      | `pg-tscope-sandbox-wus3`                                   |
+| Azure Cache for Redis (Basic)                           | `redis-tscope-sandbox-wus3`                                |
+| Log Analytics / Application Insights                    | `log-tscope-sandbox-wus3` / `appi-tscope-sandbox-wus3`     |
+| OTLP ingest: Data Collection Endpoint + Rule            | `dce-tscope-sandbox-wus3` / `dcr-tscope-sandbox-wus3-otlp` |
+| Metric + log alerts, scheduled worker jobs (`caj-ts-*`) | created on the second apply                                |
 
-`what-if` against the resource group (2026-10-01): **28 to create, 0 to
-modify, 0 to delete.**
+`what-if` against the resource group: **28 to create, 0 to modify, 0 to
+delete**; the group's other resources are ignored. The template is
+incremental and only touches resources it names, all of which carry the
+`tscope` stem.
 
-> **History.** The first target was `rg-westus3-t1-services-sandbox-Rakesh-001`
-> in `Sub_IT_Global_Sandbox_001`, a resource group shared with ~35 unrelated
-> resources. It was abandoned because the subscription lacked the
-> `Microsoft.OperationalInsights`, `Microsoft.DBforPostgreSQL` and
-> `Microsoft.Cache` providers and the deployer could not register them. The
-> workflows' explicit registry / app / deployment names (below) date from
-> then and stay: they cost nothing and protect any shared group.
+### Naming convention
+
+Resource names follow the Cloud Adoption Framework pattern the template
+implements, `<type>-<workload>-<environment>-<region>` (`infra/main.bicep`,
+Naming Convention), with workload stem `tscope`. Not `tokenscope`: Key Vault
+names are capped at 24 characters and the template truncates longer ones
+(`kv-tokenscope-sandbox-wu`). ACR names allow no hyphens (`cr…`). Supporting
+objects use the same vocabulary:
+
+| Object                           | Name                                   |
+| -------------------------------- | -------------------------------------- |
+| Entra app registration (sign-in) | `app-tokenscope-sandbox-signin`        |
+| Entra app registration (CI/CD)   | `app-tokenscope-sandbox-github-deploy` |
+| ARM deployment                   | `tokenscope-sandbox`                   |
+| GitHub environment               | `sandbox`                              |
+| Worker jobs                      | `caj-ts-<worker>` (upstream default)   |
+
+> **History.** A pilot ran on 2026-10-01/02 in a dedicated resource group on a
+> Visual Studio subscription, under an earlier stem. It moved here for credit
+> reasons once this subscription could host it. The fork's explicit
+> registry / app / deployment names (below) exist because this group is
+> shared: the stock example takes the first registry in the group.
 
 ### Why the CI identity is Contributor, not Owner
 
@@ -64,22 +81,22 @@ holding `roleAssignments/write`). So:
 
 ## 1. Prerequisites and blockers
 
-| #   | Item                                                                                                                         | Who                                                      | Status                                                                                                                                                                                                   |
-| --- | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| B1  | Register resource providers `Microsoft.App`, `Microsoft.OperationalInsights`, `Microsoft.DBforPostgreSQL`, `Microsoft.Cache` | Subscription Owner (you)                                 | Done 2026-10-01.                                                                                                                                                                                         |
-| B2  | Admin consent for Microsoft Graph `User.Read.All` (Application) on the sign-in app registration                              | Entra Global / Privileged Role / Cloud Application Admin | **Blocker for full function.** Sign-in, enrolment, telemetry work without it; people picker and manager lookups fail. If the tenant restricts user consent, sign-in itself stops at "Approval required". |
-| P1  | Contributor on the resource group for the deploying identity (Owner is not grantable here, see §0)                           | RG Owner (you)                                           | §3.2.                                                                                                                                                                                                    |
-| P2  | Two Entra app registrations (sign-in; GitHub deployment identity)                                                            | You (tenant allows users to create apps)                 | To do (§3).                                                                                                                                                                                              |
-| P3  | GitHub environment `sandbox` with secrets and variables                                                                      | Fork admin (you)                                         | To do (§4).                                                                                                                                                                                              |
-| P4  | Workflows on the fork's default branch                                                                                       | You                                                      | Merge this PR. `workflow_dispatch` only lists workflows on the default branch.                                                                                                                           |
-| —   | `Microsoft.Monitor` (not registered)                                                                                         | —                                                        | Avoided: `deployAzureMonitorWorkspace = false`.                                                                                                                                                          |
-| —   | `Microsoft.Cdn` (not registered)                                                                                             | —                                                        | Not needed: no Front Door.                                                                                                                                                                               |
-| —   | Global name availability (KV, ACR, Postgres, Redis)                                                                          | —                                                        | Checked free 2026-10-01; no soft-deleted vault with that name.                                                                                                                                           |
+| #   | Item                                                                                                                             | Who                                                      | Status                                                                                                                                                                                                   |
+| --- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| B1  | Register `Microsoft.OperationalInsights`, `Microsoft.DBforPostgreSQL`, `Microsoft.Cache` (`Microsoft.App` is already registered) | Subscription Owner (not the RG owner)                    | **Blocker** until done: the deployer's rights stop at the resource group.                                                                                                                                |
+| B2  | Admin consent for Microsoft Graph `User.Read.All` (Application) on the sign-in app registration                                  | Entra Global / Privileged Role / Cloud Application Admin | **Blocker for full function.** Sign-in, enrolment, telemetry work without it; people picker and manager lookups fail. If the tenant restricts user consent, sign-in itself stops at "Approval required". |
+| P1  | Contributor on the resource group for the deploying identity (Owner is not grantable here, see §0)                               | RG Owner (you)                                           | §3.2.                                                                                                                                                                                                    |
+| P2  | Two Entra app registrations (sign-in; GitHub deployment identity)                                                                | You (tenant allows users to create apps)                 | To do (§3).                                                                                                                                                                                              |
+| P3  | GitHub environment `sandbox` with secrets and variables                                                                          | Fork admin (you)                                         | To do (§4).                                                                                                                                                                                              |
+| P4  | Workflows on the fork's default branch                                                                                           | You                                                      | Merge this PR. `workflow_dispatch` only lists workflows on the default branch.                                                                                                                           |
+| —   | `Microsoft.Monitor` (not registered)                                                                                             | —                                                        | Avoided: `deployAzureMonitorWorkspace = false`.                                                                                                                                                          |
+| —   | `Microsoft.Cdn` (not registered)                                                                                                 | —                                                        | Not needed: no Front Door.                                                                                                                                                                               |
+| —   | Global name availability (KV, ACR, Postgres, Redis)                                                                              | —                                                        | Checked free 2026-10-01; no soft-deleted vault with that name.                                                                                                                                           |
 
-Providers (B1):
+Providers (B1), run by someone with rights on the subscription:
 
 ```bash
-for ns in Microsoft.App Microsoft.OperationalInsights Microsoft.DBforPostgreSQL Microsoft.Cache; do
+for ns in Microsoft.OperationalInsights Microsoft.DBforPostgreSQL Microsoft.Cache; do
   az provider register --subscription "$SUB" --namespace "$ns"
 done
 ```
@@ -100,8 +117,8 @@ every resource. Confirm the context:
 ```bash
 SUB=<subscription id>
 az account set --subscription "$SUB"
-RG=rg-tokenscope-sandbox-wus3
-az group create -n "$RG" -l westus3 --tags project=tokenscope env=sandbox
+RG=rg-westus3-t1-services-sandbox-Rakesh-001
+az group show -n "$RG" --query location -o tsv            # westus3 (existing, shared)
 ```
 
 ## 3. Entra ID app registrations
@@ -111,7 +128,7 @@ az group create -n "$RG" -l westus3 --tags project=tokenscope env=sandbox
 Per [DEPLOY-AZURE.md §1, Entra ID app registration](../DEPLOY-AZURE.md#entra-id-app-registration):
 
 ```bash
-SIGNIN_APP=$(az ad app create --display-name tokenscope-sandbox-wus3-signin \
+SIGNIN_APP=$(az ad app create --display-name app-tokenscope-sandbox-signin \
   --sign-in-audience AzureADMyOrg --query appId -o tsv)
 az ad sp create --id "$SIGNIN_APP"
 # Graph: delegated openid/profile/email/offline_access/User.Read, application User.Read.All
@@ -135,7 +152,7 @@ are added in §5 step 4, once the app's host is known.
 ### 3.2 Deployment identity (GitHub Actions OIDC, no stored Azure secret)
 
 ```bash
-DEPLOY_APP=$(az ad app create --display-name tokenscope-sandbox-wus3-gha \
+DEPLOY_APP=$(az ad app create --display-name app-tokenscope-sandbox-github-deploy \
   --sign-in-audience AzureADMyOrg --query appId -o tsv)
 az ad sp create --id "$DEPLOY_APP"
 az ad app federated-credential create --id "$DEPLOY_APP" --parameters '{
@@ -213,8 +230,8 @@ Without `gh`, paste each value in the GitHub UI.
 | `TOKENSCOPE_DEPLOY_RBAC`     | yes here           | `false` (CI identity is Contributor, §0)  | infra → `deployRbac`                                             |
 | `TOKENSCOPE_PARAMS`          | yes                | `infra/parameters/sandbox.bicepparam`     | infra                                                            |
 | `TOKENSCOPE_DEPLOYMENT_NAME` | yes here           | `tokenscope-sandbox`                      | infra                                                            |
-| `TOKENSCOPE_ACR_NAME`        | yes here           | `crtssunilsandboxwus3`                    | deploy                                                           |
-| `TOKENSCOPE_APP_NAME`        | yes here           | `ca-tssunil-sandbox-wus3`                 | deploy                                                           |
+| `TOKENSCOPE_ACR_NAME`        | yes here           | `crtscopesandboxwus3`                     | deploy                                                           |
+| `TOKENSCOPE_APP_NAME`        | yes here           | `ca-tscope-sandbox-wus3`                  | deploy                                                           |
 | `ENTRA_TENANT_ID`            | yes                | tenant id                                 | infra → `entraIdTenantId`                                        |
 | `ENTRA_CLIENT_ID`            | yes                | `$SIGNIN_APP` (§3.1)                      | infra → `entraIdClientId`                                        |
 | `BOOTSTRAP_ADMIN_EMAIL`      | yes                | your Entra email (becomes platform-admin) | infra → `bootstrapAdminEmail`                                    |
@@ -256,7 +273,7 @@ Run from **Actions** on `main`, environment `sandbox`.
    ```bash
    az deployment group show -g "$RG" -n tokenscope-sandbox \
      --query properties.outputs.containerAppUrl.value -o tsv \
-     || az containerapp show -g "$RG" -n ca-tssunil-sandbox-wus3 \
+     || az containerapp show -g "$RG" -n ca-tscope-sandbox-wus3 \
           --query properties.configuration.ingress.fqdn -o tsv
    HOST=<that fqdn>
    az ad app update --id "$SIGNIN_APP" \
@@ -272,16 +289,16 @@ Run from **Actions** on `main`, environment `sandbox`.
 
 ## 6. Validation
 
-| Check              | Command / action                                                                                                                       | Expect                                   |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| Health             | `curl -s -o /dev/null -w '%{http_code}' https://$HOST/api/health`                                                                      | `200`                                    |
-| Build              | `curl -s https://$HOST/api/v1/meta/build`                                                                                              | `commit` = the deployed SHA              |
-| Revision           | `az containerapp revision list -g "$RG" -n ca-tssunil-sandbox-wus3 -o table`                                                           | latest revision Healthy, 100% traffic    |
-| Sign-in            | Open `https://$HOST/login`, sign in with `BOOTSTRAP_ADMIN_EMAIL`                                                                       | lands as platform-admin                  |
-| Workers            | `az containerapp job list -g "$RG" --query "[?starts_with(name,'caj-ts')].name" -o tsv`                                                | jobs present after step 5                |
-| Join runs          | `az containerapp job execution list -g "$RG" -n caj-ts-azure-monitor-read -o table`                                                    | executions every 5 min, Succeeded        |
-| Telemetry          | [DEPLOY-AZURE.md, Check that telemetry arrives](../DEPLOY-AZURE.md#check-that-telemetry-arrives)                                       | `OTelLogs` rows after a developer enrols |
-| App identity roles | `az role assignment list --all --assignee $(az identity show -g "$RG" -n id-tssunil-sandbox-wus3 --query principalId -o tsv) -o table` | 5 assignments (§0)                       |
+| Check              | Command / action                                                                                                                      | Expect                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Health             | `curl -s -o /dev/null -w '%{http_code}' https://$HOST/api/health`                                                                     | `200`                                    |
+| Build              | `curl -s https://$HOST/api/v1/meta/build`                                                                                             | `commit` = the deployed SHA              |
+| Revision           | `az containerapp revision list -g "$RG" -n ca-tscope-sandbox-wus3 -o table`                                                           | latest revision Healthy, 100% traffic    |
+| Sign-in            | Open `https://$HOST/login`, sign in with `BOOTSTRAP_ADMIN_EMAIL`                                                                      | lands as platform-admin                  |
+| Workers            | `az containerapp job list -g "$RG" --query "[?starts_with(name,'caj-ts')].name" -o tsv`                                               | jobs present after step 5                |
+| Join runs          | `az containerapp job execution list -g "$RG" -n caj-ts-azure-monitor-read -o table`                                                   | executions every 5 min, Succeeded        |
+| Telemetry          | [DEPLOY-AZURE.md, Check that telemetry arrives](../DEPLOY-AZURE.md#check-that-telemetry-arrives)                                      | `OTelLogs` rows after a developer enrols |
+| App identity roles | `az role assignment list --all --assignee $(az identity show -g "$RG" -n id-tscope-sandbox-wus3 --query principalId -o tsv) -o table` | 5 assignments (§0)                       |
 
 ## 7. Rollback
 
@@ -289,9 +306,9 @@ Run from **Actions** on `main`, environment `sandbox`.
   roll or verification fails, and never moves `latest`. By hand:
 
   ```bash
-  az containerapp revision list -g "$RG" -n ca-tssunil-sandbox-wus3 -o table
-  az containerapp update -g "$RG" -n ca-tssunil-sandbox-wus3 \
-    --image crtssunilsandboxwus3.azurecr.io/tokenscope:<previous-12-char-sha>
+  az containerapp revision list -g "$RG" -n ca-tscope-sandbox-wus3 -o table
+  az containerapp update -g "$RG" -n ca-tscope-sandbox-wus3 \
+    --image crtscopesandboxwus3.azurecr.io/tokenscope:<previous-12-char-sha>
   ```
 
   Database migrations run on boot and are forward-only: an image older than
@@ -302,19 +319,21 @@ Run from **Actions** on `main`, environment `sandbox`.
   **TokenScope infra** `apply`. Deployments are incremental; removed resources
   are not deleted automatically.
 - **Database:** Flexible Server point-in-time restore (7-day backups):
-  `az postgres flexible-server restore -g "$RG" --name pg-tssunil-sandbox-wus3-restore --source-server pg-tssunil-sandbox-wus3 --restore-time <UTC ISO time>`,
+  `az postgres flexible-server restore -g "$RG" --name pg-tscope-sandbox-wus3-restore --source-server pg-tscope-sandbox-wus3 --restore-time <UTC ISO time>`,
   then point `database-url` in Key Vault at it.
-- **Full teardown:** the resource group holds only this deployment, so
-  review it and delete the group:
+- **Full teardown** (the resource group is shared: **never delete the
+  group**). Delete only this deployment's resources; review the list first:
 
   ```bash
-  az resource list -g "$RG" -o table
-  az group delete -n "$RG"
+  az resource list -g "$RG" --query "[?contains(name,'tscope') || starts_with(name,'caj-ts-')].{name:name,type:type}" -o table
+  # after review: app and jobs first, then the rest
+  az resource list -g "$RG" --query "[?starts_with(name,'caj-ts-') || name=='ca-tscope-sandbox-wus3'].id" -o tsv | xargs -r az resource delete --ids
+  az resource list -g "$RG" --query "[?contains(name,'tscope')].id" -o tsv | xargs -r az resource delete --ids
   ```
 
   The Key Vault stays soft-deleted for 90 days: redeploy with
   `keyVaultCreateMode = 'recover'`, or purge it
-  (`az keyvault purge -n kv-tssunil-sandbox-wus3`). Remove the role
+  (`az keyvault purge -n kv-tscope-sandbox-wus3`). Remove the role
   assignment and the two app registrations if retiring the environment.
 
 ## 8. Keeping the fork in sync with upstream

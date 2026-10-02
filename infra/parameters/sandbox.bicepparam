@@ -13,10 +13,16 @@ using '../main.bicep'
 
 param env = 'sandbox'
 param location = 'westus3'
-// Globally unique stem for Key Vault / ACR / Postgres / Redis names.
-// Resulting names: kv-tssunil-sandbox-wus3, crtssunilsandboxwus3,
-// pg-tssunil-sandbox-wus3, ca-tssunil-sandbox-wus3.
-param projectName = 'tssunil'
+// Workload stem in the template's CAF-style names, <type>-<stem>-<env>-<region>
+// (infra/main.bicep, Naming Convention). 'tscope' rather than 'tokenscope'
+// because Key Vault names are capped at 24 characters and the template
+// truncates longer ones (kv-tokenscope-sandbox-wu). Names are global for Key
+// Vault, ACR, Postgres and Redis. Resulting names:
+//   id-tscope-sandbox-wus3     cae-tscope-sandbox-wus3   ca-tscope-sandbox-wus3
+//   crtscopesandboxwus3        kv-tscope-sandbox-wus3    pg-tscope-sandbox-wus3
+//   redis-tscope-sandbox-wus3  log-tscope-sandbox-wus3   appi-tscope-sandbox-wus3
+//   dce-tscope-sandbox-wus3    dcr-tscope-sandbox-wus3-otlp
+param projectName = 'tscope'
 param imageTag = 'latest'
 
 // Grants the app's managed identity AcrPull, Key Vault Secrets User and the
