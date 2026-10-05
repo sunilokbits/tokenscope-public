@@ -32,7 +32,6 @@ import {
   makeChainCaches,
   type GetManager,
 } from '../../../server/reconciliation/region-derivation'
-import { LOCK_NAMESPACE } from '../../../server/db/advisory-lock'
 
 let t: TestDb
 let regionAId: string
@@ -270,9 +269,23 @@ describe('C5 — a unit rule is the region rule mechanism, retargeted', () => {
   // one test's leftover rule cannot decide another's outcome.
   afterEach(async () => { await clearRules(); await resetTeammates() })
 
-  it('a region admin creates a rule into their OWN cost centre; the rule\'s region is the unit\'s', async () => {
+  it('a REGION admin may not write any rule — not into their own cost centre, not another region\'s, not a region rule (403, nothing written)', async () => {
+    // A unit rule is step 0 of the placement resolver, so it decides the REGION
+    // of everyone it matches; it cannot be confined to the author's region.
+    for (const body of [
+      { attribute: 'department', match_value: 'Own', org_unit_id: couAId },
+      { attribute: 'department', match_value: 'Foreign', org_unit_id: couBId },
+      { attribute: 'department', match_value: 'Anything', region_id: regionAId },
+    ]) {
+      await expect(call(rulesPost, ev({ session: adminA(), body }))).rejects.toMatchObject({ statusCode: 403 })
+    }
+    const [{ n }] = await t.client<{ n: string }[]>`SELECT COUNT(*)::text AS n FROM directory_region_rule`
+    expect(Number(n)).toBe(0)
+  })
+
+  it('platform-admin creates a unit rule; the rule\'s region is the unit\'s', async () => {
     const res = await call<{ id: string; org_unit_id: string; region_id: string }>(rulesPost, ev({
-      session: adminA(),
+      session: finops(),
       body: { attribute: 'department', match_value: '  Sales-Solution  ', org_unit_id: couAId },
     }))
     expect(res.org_unit_id).toBe(couAId)
@@ -284,26 +297,6 @@ describe('C5 — a unit rule is the region rule mechanism, retargeted', () => {
       FROM directory_region_rule WHERE id = ${res.id}::uuid`
     expect(row!.match_value).toBe('sales-solution') // normalised by the shared normaliser
     expect(row!.region_id).toBe(regionAId)
-  })
-
-  it('a region admin CANNOT create a rule into another region\'s cost centre', async () => {
-    await expect(
-      call(rulesPost, ev({
-        session: adminA(),
-        body: { attribute: 'department', match_value: 'Foreign', org_unit_id: couBId },
-      })),
-    ).rejects.toMatchObject({ statusCode: 403 })
-    const [{ n }] = await t.client<{ n: string }[]>`SELECT COUNT(*)::text AS n FROM directory_region_rule`
-    expect(Number(n)).toBe(0)
-  })
-
-  it('a region admin CANNOT create a REGION rule — that is org-wide config', async () => {
-    await expect(
-      call(rulesPost, ev({
-        session: adminA(),
-        body: { attribute: 'department', match_value: 'Anything', region_id: regionAId },
-      })),
-    ).rejects.toMatchObject({ statusCode: 403 })
   })
 
   it('platform-admin still creates region rules, and they carry no unit', async () => {
@@ -330,13 +323,13 @@ describe('C5 — a unit rule is the region rule mechanism, retargeted', () => {
   it('the target must be able to receive spend: a non-cost-owning unit and a retired one are both refused', async () => {
     await expect(
       call(rulesPost, ev({
-        session: adminA(),
+        session: finops(),
         body: { attribute: 'department', match_value: 'TeamTarget', org_unit_id: teamAId },
       })),
     ).rejects.toMatchObject({ statusCode: 422 })
     await expect(
       call(rulesPost, ev({
-        session: adminA(),
+        session: finops(),
         body: { attribute: 'department', match_value: 'RetiredTarget', org_unit_id: retAId },
       })),
     ).rejects.toMatchObject({ statusCode: 422 })
@@ -344,108 +337,9 @@ describe('C5 — a unit rule is the region rule mechanism, retargeted', () => {
     expect(Number(n)).toBe(0)
   })
 
-  it('the UPSERT cannot be used to hijack another region\'s rule', async () => {
-    // B's admin owns this (attribute, value).
-    await call(rulesPost, ev({
-      session: adminB(),
-      body: { attribute: 'department', match_value: 'Contested', org_unit_id: couBId },
-    }))
-    // A's admin naming the SAME value would otherwise re-point it at their unit.
-    await expect(
-      call(rulesPost, ev({
-        session: adminA(),
-        body: { attribute: 'department', match_value: 'Contested', org_unit_id: couAId },
-      })),
-    ).rejects.toMatchObject({ statusCode: 403 })
-    const [row] = await t.client<{ org_unit_id: string }[]>`
-      SELECT org_unit_id::text AS org_unit_id FROM directory_region_rule WHERE match_value = 'contested'`
-    expect(row!.org_unit_id).toBe(couBId) // untouched
-  })
-
-  it('the UPSERT cannot be used to hijack a rule that did not exist when the check ran', async () => {
-    /*
-     * THE NO-ROW-YET RACE. The authorisation that stops a hijack is a statement
-     * about the row being replaced, and `SELECT … FOR UPDATE` locks NOTHING when
-     * there is no row: two regions both read "free", both skip a check with
-     * nothing to check, and the loser's ON CONFLICT DO UPDATE re-points the
-     * winner's rule.
-     *
-     * Interleaved deterministically. An outside transaction takes the same upsert
-     * key, writes region B's rule, and is still uncommitted when adminA's request
-     * starts — so adminA reaches the key with the row genuinely absent from its
-     * snapshot, exactly as it would in the real race.
-     */
-    const key = 'department:contested-race'
-    let openTheGate!: () => void
-    const gate = new Promise<void>((resolve) => { openTheGate = resolve })
-    let winnerReady!: () => void
-    const winnerHasWritten = new Promise<void>((resolve) => { winnerReady = resolve })
-    const winner = t.client.begin(async (tx) => {
-      await tx`SELECT pg_advisory_xact_lock(${LOCK_NAMESPACE.directoryRule}::int, hashtext(${key})::int)`
-      await tx`
-        INSERT INTO directory_region_rule (attribute, match_mode, match_value, match_value_raw, region_id, org_unit_id, created_by)
-        VALUES ('department', 'exact', 'contested-race', 'Contested-Race', ${regionBId}::uuid, ${couBId}::uuid, ${adminBId}::uuid)`
-      winnerReady()
-      await gate // held open, uncommitted, while the loser's request runs
-    })
-    await winnerHasWritten
-
-    const hijack = call(rulesPost, ev({
-      session: adminA(),
-      body: { attribute: 'department', match_value: 'Contested-Race', org_unit_id: couAId },
-    })).then(
-      () => 'resolved' as const,
-      (e: { statusCode?: number }) => e.statusCode ?? 'threw',
-    )
-
-    // Wait until the request is genuinely BLOCKED before releasing — with the
-    // advisory lock it blocks on the key, and without it, it blocks on the
-    // duplicate-key insert. Either way the interleaving is real, not a sleep.
-    const deadline = Date.now() + 15_000
-    for (;;) {
-      const [{ n }] = await t.client<{ n: number }[]>`
-        SELECT COUNT(*)::int AS n FROM pg_stat_activity
-        WHERE datname = current_database() AND wait_event_type = 'Lock' AND pid <> pg_backend_pid()`
-      if (n > 0) break
-      if (Date.now() > deadline) {
-        openTheGate()
-        await winner
-        throw new Error('the concurrent rule write never blocked')
-      }
-      await new Promise((r) => setTimeout(r, 25))
-    }
-    openTheGate()
-    await winner
-
-    // The loser must AUTHORISE against what it now finds, not against the absence
-    // it saw first.
-    expect(await hijack).toBe(403)
-    const [row] = await t.client<{ org_unit_id: string }[]>`
-      SELECT org_unit_id::text AS org_unit_id FROM directory_region_rule WHERE match_value = 'contested-race'`
-    expect(row!.org_unit_id).toBe(couBId)
-  })
-
-  it('a region admin cannot convert an org-wide REGION rule into a rule feeding their cost centre', async () => {
-    await call(rulesPost, ev({
-      session: finops(),
-      body: { attribute: 'companyName', match_value: 'Insight Global', region_id: regionBId },
-    }))
-    await expect(
-      call(rulesPost, ev({
-        session: adminA(),
-        body: { attribute: 'companyName', match_value: 'Insight Global', org_unit_id: couAId },
-      })),
-    ).rejects.toMatchObject({ statusCode: 403 })
-    const [row] = await t.client<{ org_unit_id: string | null; region_id: string }[]>`
-      SELECT org_unit_id::text AS org_unit_id, region_id::text AS region_id
-      FROM directory_region_rule WHERE match_value = 'insight global'`
-    expect(row!.org_unit_id).toBeNull()
-    expect(row!.region_id).toBe(regionBId)
-  })
-
   it('the region-scoped list shows this region\'s unit rules and nothing else', async () => {
-    await call(rulesPost, ev({ session: adminA(), body: { attribute: 'department', match_value: 'Mine', org_unit_id: couAId } }))
-    await call(rulesPost, ev({ session: adminB(), body: { attribute: 'department', match_value: 'Theirs', org_unit_id: couBId } }))
+    await call(rulesPost, ev({ session: finops(), body: { attribute: 'department', match_value: 'Mine', org_unit_id: couAId } }))
+    await call(rulesPost, ev({ session: finops(), body: { attribute: 'department', match_value: 'Theirs', org_unit_id: couBId } }))
     await call(rulesPost, ev({ session: finops(), body: { attribute: 'country', match_value: 'Australia', region_id: regionAId } }))
 
     const res = await call<{ rules: Array<{ match_value: string; org_unit_id: string | null; target_placeable: boolean | null }> }>(
@@ -464,7 +358,7 @@ describe('C5 — a unit rule is the region rule mechanism, retargeted', () => {
 
   it('a rule whose unit is retired is reported as placing nobody, and the loader DROPS it rather than degrading it to an org-wide region rule', async () => {
     const doomed = await mkUnit({ regionId: regionAId, path: 'prra.doomed', code: 'prra-doomed', name: 'A Doomed', parentId: rootAId })
-    await call(rulesPost, ev({ session: adminA(), body: { attribute: 'department', match_value: 'Doomed', org_unit_id: doomed } }))
+    await call(rulesPost, ev({ session: finops(), body: { attribute: 'department', match_value: 'Doomed', org_unit_id: doomed } }))
     await t.client`UPDATE org_unit SET retired_at = now() WHERE id = ${doomed}::uuid`
 
     const res = await call<{ rules: Array<{ match_value: string; target_placeable: boolean | null }> }>(
@@ -473,25 +367,22 @@ describe('C5 — a unit rule is the region rule mechanism, retargeted', () => {
     )
     expect(res.rules.find((r) => r.match_value === 'doomed')!.target_placeable).toBe(false)
 
-    // THE PRIVILEGE BOUNDARY. Degrading the dead target to `{ orgUnitId: null }`
-    // yields a REGION rule — the artefact a region admin is refused when they ask
-    // for one directly, because it decides which REGION everyone matching lands in.
-    // Retiring a unit must not hand its author org-wide configuration, so the rule
+    // Degrading the dead target to `{ orgUnitId: null }` would yield a REGION
+    // rule, which decides which REGION everyone matching lands in. The rule
     // places NOBODY until the target is fixed.
     const rules = await makePlacementStore(t.db).loadDirectoryRegionRules()
     expect(rules.exact.get('department')?.get('doomed')).toBeUndefined()
   })
 
-  it('retiring a unit rule\'s target cannot escalate it into region configuration a region admin could not author', async () => {
-    // The escalation path, end to end. adminA may write a UNIT rule into their own
-    // region and may NOT write a region rule at all (asserted above). If the loader
-    // degraded a dead unit target to its region, retiring the unit would convert
-    // one into the other — and an attribute REGION rule outranks a chain region
+  it('retiring a unit rule\'s target cannot turn it into a region rule', async () => {
+    // The escalation path, end to end. If the loader degraded a dead unit target
+    // to its region, retiring the unit would convert a unit rule into a region
+    // rule — and an attribute REGION rule outranks a chain region
     // leader, so it would start deciding the region of people whose own chain says
     // otherwise. The victim below is such a person: in region B by their chain.
     const doomed = await mkUnit({ regionId: regionAId, path: 'prra.esc', code: 'prra-esc', name: 'A Escalation', parentId: rootAId })
     await call(rulesPost, ev({
-      session: adminA(), body: { attribute: 'department', match_value: 'Escalate', org_unit_id: doomed },
+      session: finops(), body: { attribute: 'department', match_value: 'Escalate', org_unit_id: doomed },
     }))
     await t.client`UPDATE org_unit SET retired_at = now() WHERE id = ${doomed}::uuid`
 
@@ -527,10 +418,10 @@ describe('C5 — a unit rule is the region rule mechanism, retargeted', () => {
 
   it('delete: a region admin removes their own unit rule, and cannot remove another region\'s or an org-wide one', async () => {
     const mine = await call<{ id: string }>(rulesPost, ev({
-      session: adminA(), body: { attribute: 'department', match_value: 'DelMine', org_unit_id: couAId },
+      session: finops(), body: { attribute: 'department', match_value: 'DelMine', org_unit_id: couAId },
     }))
     const theirs = await call<{ id: string }>(rulesPost, ev({
-      session: adminB(), body: { attribute: 'department', match_value: 'DelTheirs', org_unit_id: couBId },
+      session: finops(), body: { attribute: 'department', match_value: 'DelTheirs', org_unit_id: couBId },
     }))
     const orgWide = await call<{ id: string }>(rulesPost, ev({
       session: finops(), body: { attribute: 'country', match_value: 'DelGlobal', region_id: regionAId },
@@ -552,7 +443,7 @@ describe('C5 — a unit rule is the region rule mechanism, retargeted', () => {
     // sasha (dir-oid-0001) reports to mei (dir-oid-0003), who owns couA — so the
     // chain alone would place her there. A rule naming couA2 must win.
     await call(rulesPost, ev({
-      session: adminA(), body: { attribute: 'department', match_value: 'APAC Digital', org_unit_id: couA2Id },
+      session: finops(), body: { attribute: 'department', match_value: 'APAC Digital', org_unit_id: couA2Id },
     }))
     const tm = await mkBillTeammate({ email: 'sasha.kumar@example.com', regionId: regionAId, orgUnitId: holdingAId })
 

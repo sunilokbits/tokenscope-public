@@ -21,12 +21,12 @@
  * propagates out of withRequestRls's callback, and withRequestRls runs inside
  * db.transaction, so the uncaught throw rolls the delete back — the row
  * survives a denied delete. An unmapped org (region_id IS NULL) is
- * estate-level and skips the check entirely, matching orgs.post's `if
- * (regionId)` guard, or every legacy unmapped org becomes undeletable.
+ * estate-level: platform-admin only (403 otherwise).
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { sql } from 'drizzle-orm'
 import { requireRole, requireRegionScopeOrNotFound } from '../../../../../auth/rbac'
+import { isPlatformAdmin } from '../../../../../../shared/auth/roles'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
@@ -70,9 +70,8 @@ export default defineEventHandler(async (event) => {
       })
     if (!row) throw notFound()
 
-    // Region-scope AFTER the row is known: an unmapped org (region_id NULL)
-    // is estate-level and stays deletable by any region admin (the
-    // onboarding-teardown surface). A DENY here throws uncaught — the
+    // Region-scope AFTER the row is known: an unmapped org (region_id NULL) is
+    // estate-level, so platform-admin only. A DENY here throws uncaught — the
     // transaction this callback runs in rolls back the DELETE above.
     //
     // The denial is the SAME 404 an unknown id gets (PR #204 review): a
@@ -80,6 +79,18 @@ export default defineEventHandler(async (event) => {
     // and this handler's own header promises it is not one. Resolving first and
     // scoping second removes the oracle only if BOTH outcomes look identical.
     if (row.region_id) await requireRegionScopeOrNotFound(event, row.region_id, notFound())
+    else if (!isPlatformAdmin(caller.role)) {
+      throw createError({
+        statusCode: 403,
+        statusMessage: 'Forbidden',
+        data: {
+          type: 'https://tokenscope.example.com/errors/forbidden',
+          title: 'Forbidden',
+          status: 403,
+          detail: 'An unmapped provider org (no region) is estate-wide; only platform-admin may write it.',
+        },
+      })
+    }
 
     await recordAuditEvent(tx, {
       eventType: 'provider-org-deleted',

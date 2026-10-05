@@ -91,6 +91,12 @@ import { MONTH_REGEX } from '../../../../../utils/period'
 import { requestClock } from '../../../../../utils/request-clock'
 import { shiftUtcDay } from '../../../../../../shared/reports/clock'
 import { WindowQuery } from '../../../../../../shared/schemas/usage'
+import { parseSpendLens } from '../../../../../../shared/usage/lens'
+import type { MeProjectChargebackResponse } from '../../../../../../shared/reports/project-chargeback'
+import {
+  fetchProjectChargebackContributors,
+  fetchProjectChargebackSeries,
+} from '../../../../../reporting/project-chargeback'
 
 /** Manager-facing project figures drop unconfirmed identity bindings. */
 const PROJECT_SPEND_OPTS = { excludeProvisional: true } as const
@@ -112,6 +118,7 @@ const ProjectWindowQuery = z
       .string()
       .regex(/^\d{4}-\d{2}-\d{2}$/)
       .optional(),
+    lane: z.unknown().optional(),
   })
   .merge(WindowQuery)
 
@@ -149,6 +156,7 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'Invalid project code' })
   }
   const query = await getValidatedQuery(event, (d) => ProjectWindowQuery.parse(d))
+  const lane = parseSpendLens(query.lane)
   // The ONE instant this request may read (F1/D1). Pre-seeded by a test — or by
   // the dev-only clock pin the parity capture uses to shoot a real day 1.
   const clock = requestClock(event)
@@ -193,6 +201,84 @@ export default defineEventHandler(async (event) => {
           detail: 'No project with this code among your current memberships.',
         },
       })
+    }
+
+    // J5: the PM's budget entry point — role from the caller's own assignment;
+    // budget_allocation_id is the currently-effective baseline.
+    const viewerRows = await tx.execute<{ role: string }>(sqlRaw`
+      SELECT role FROM project_assignment
+      WHERE project_id = ${project.id}::uuid
+        AND teammate_id = ${session.teammateId}::uuid
+        AND effective @> now()
+      LIMIT 1
+    `)
+    const viewerRole = [...viewerRows][0]?.role ?? 'member'
+    const baselineRows = await tx.execute<{ id: string }>(sqlRaw`
+      SELECT id::text AS id FROM allocation
+      WHERE scope_type = 'project' AND scope_id = ${project.id}::uuid
+        AND teammate_id IS NULL AND allocation_kind = 'baseline'
+        AND effective @> now()
+      LIMIT 1
+    `)
+    const viewer = {
+      role: viewerRole,
+      access: project.access,
+      budget_allocation_id: [...baselineRows][0]?.id ?? null,
+    }
+    const projectBlock = {
+      id: project.id,
+      code: project.code,
+      display_name: project.display_name,
+      type: project.type,
+      wbs_code: project.wbs_code,
+      end_date: project.end_date,
+      ended: project.ended,
+    }
+    const windowBlock = {
+      from: win.from,
+      to: win.to,
+      is_month: win.isMonth,
+      month: win.monthStr,
+      days_elapsed: elapsedDays,
+      days_in_window: spanDays,
+    }
+    // R2 F1: a cou-owner viewer is NOT a member — aggregates only, never the
+    // NAMED per-developer contribution rows.
+    const namedMembersVisible = project.access === 'member'
+
+    // Chargeback lens: bill dollars only, so none of the §A reads below run.
+    if (lane === 'chargeback') {
+      const [cb, contributors] = await Promise.all([
+        fetchProjectChargebackSeries(tx, project.id, window),
+        fetchProjectChargebackContributors(tx, project.id, window),
+      ])
+      const anthropic = providerStatesForWindow(
+        { monthStr: win.monthStr, endIso: win.endIso },
+        now,
+      ).find((s) => s.vendor === 'anthropic')!
+      const body: MeProjectChargebackResponse = {
+        viewer,
+        project: projectBlock,
+        window: windowBlock,
+        lane,
+        chargeback: {
+          total_usd: cb.totalUsd.toFixed(2),
+          series: cb.series.map((d) => ({ date: d.date, cost_usd: d.usd.toFixed(2) })),
+          contributors: {
+            members: namedMembersVisible
+              ? contributors.map((c) => ({
+                  teammate_id: c.teammate_id,
+                  display_name: c.display_name,
+                  email: c.email,
+                  cost_usd: Number(c.usd).toFixed(2),
+                }))
+              : [],
+            member_count: contributors.length,
+          },
+          settling: anthropic,
+        },
+      }
+      return body
     }
 
     // Spike-threshold dial (mig 0049): resolved for the PROJECT's region
@@ -334,59 +420,20 @@ export default defineEventHandler(async (event) => {
       untaggedPct = pctDelta(Number(untagged.cost_usd), Number(prevUntagged.cost_usd))
     }
 
-    // J5: the PM's budget entry point — role from the caller's own assignment;
-    // budget_allocation_id is the currently-effective baseline.
-    const viewerRows = await tx.execute<{ role: string }>(sqlRaw`
-      SELECT role FROM project_assignment
-      WHERE project_id = ${project.id}::uuid
-        AND teammate_id = ${session.teammateId}::uuid
-        AND effective @> now()
-      LIMIT 1
-    `)
-    const viewerRole = [...viewerRows][0]?.role ?? 'member'
-    const baselineRows = await tx.execute<{ id: string }>(sqlRaw`
-      SELECT id::text AS id FROM allocation
-      WHERE scope_type = 'project' AND scope_id = ${project.id}::uuid
-        AND teammate_id IS NULL AND allocation_kind = 'baseline'
-        AND effective @> now()
-      LIMIT 1
-    `)
-
-    // R2 F1: a cou-owner viewer is NOT a member — aggregates only, never the
-    // NAMED per-developer contribution rows.
-    const namedMembersVisible = project.access === 'member'
     const memberTotal = members.reduce((a, m) => a + m.costUsd, 0)
     const top2 = members.slice(0, 2).reduce((a, m) => a + m.costUsd, 0)
 
     return {
-      viewer: {
-        role: viewerRole,
-        access: project.access,
-        budget_allocation_id: [...baselineRows][0]?.id ?? null,
-      },
-      project: {
-        id: project.id,
-        code: project.code,
-        display_name: project.display_name,
-        type: project.type,
-        wbs_code: project.wbs_code,
-        end_date: project.end_date,
-        ended: project.ended,
-      },
+      viewer,
+      project: projectBlock,
       /*
        * The window every figure below shares (D16). `days_elapsed` /
        * `days_in_window` are the pace operands the client's budgetPace /
        * projectedMonthEnd vocabulary consumes (D15) — computed HERE so the
        * pill and the figures cannot window two different ways.
        */
-      window: {
-        from: win.from,
-        to: win.to,
-        is_month: win.isMonth,
-        month: win.monthStr,
-        days_elapsed: elapsedDays,
-        days_in_window: spanDays,
-      },
+      window: windowBlock,
+      lane,
       budget: {
         window_cost_usd: windowUsd.toFixed(2),
         allocation_usd: allocation.toFixed(2),

@@ -31,6 +31,8 @@ import DateRangeControl from '../../components/reporting/DateRangeControl.vue'
 import CcHeaderNotes from '../../components/reporting/cost-centre/CcHeaderNotes.vue'
 import ModelSplitPanel from '../../components/reporting/ModelSplitPanel.vue'
 import ExportCsvButton from '../../components/reporting/ExportCsvButton.vue'
+import LaneToggle from '../../components/reporting/LaneToggle.vue'
+import ProjectChargebackView from '../../components/projects/ChargebackView.vue'
 import DrillName from '../../components/reporting/DrillName.vue'
 import {
   entryReportRoute,
@@ -46,6 +48,11 @@ import {
 import { modelBucketKind } from '#shared/reports/model-attribution'
 import { seriesColor } from '../../composables/useChartScale'
 import type { DriverRow, ProviderState, ReportCoverageMeta } from '#shared/reports/types'
+import type {
+  MeProjectChargebackResponse,
+  ReportsProjectChargebackResponse,
+} from '#shared/reports/project-chargeback'
+import { PROJECT_LENS_COPY, type SpendLens } from '#shared/usage/lens'
 import type {
   ActivitySlice,
   MemberContribution,
@@ -136,10 +143,21 @@ interface ProjectResp {
   page_freshness: { aggregate_minutes_ago: number | null }
   providerStates: ProviderState[]
   coverage: ReportCoverageMeta | null
+  lane?: 'usage'
 }
+
+/** Chargeback lane: the identity blocks plus the bill split; no §A blocks. */
+type ProjectChargebackResp = MeProjectChargebackResponse
 
 const route = useRoute()
 const code = computed(() => String(route.params.code ?? ''))
+
+// `?lane=` is the request; every figure renders the lane the server echoed.
+const lane = usePersonalLens()
+const PROJECT_LENS_CAPTIONS: Record<SpendLens, string> = {
+  usage: PROJECT_LENS_COPY.usage.caption,
+  chargeback: PROJECT_LENS_COPY.chargeback.caption,
+}
 
 const { session, ensure } = useSession()
 await ensure()
@@ -165,11 +183,19 @@ const windowQuery = computed(() => ({
   // `?window=30|90` — the documented parameter (shared/schemas/usage.ts), and it
   // governs the burn block ALONE. Every other figure follows month XOR from/to.
   window: burnWindowDays.value,
+  lane: lane.value,
 }))
 
-const { data, error, pending } = await useFetch<ProjectResp>(
+const { data: payload, error, pending } = await useFetch<ProjectResp | ProjectChargebackResp>(
   () => `/api/v1/me/projects/${encodeURIComponent(code.value)}`,
   { query: windowQuery, lazy: true },
+)
+/** The usage-lane payload; null under chargeback, where the §A blocks are absent. */
+const data = computed<ProjectResp | null>(() =>
+  payload.value && payload.value.lane !== 'chargeback' ? payload.value : null,
+)
+const cbData = computed<ProjectChargebackResp | null>(() =>
+  payload.value?.lane === 'chargeback' ? payload.value : null,
 )
 
 const notFound = computed(() => (error.value as { statusCode?: number } | null)?.statusCode === 404)
@@ -222,13 +248,16 @@ interface ProjectReportsResp {
     rows_total_usd: string
   }
   meta: { providerStates: ProviderState[]; coverage: ReportCoverageMeta | null }
+  lane?: 'usage'
 }
 
+type ProjectReportsChargebackResp = ReportsProjectChargebackResponse
+
 const {
-  data: reportsData,
+  data: reportsPayload,
   pending: reportsPending,
   refresh: refreshReports,
-} = await useFetch<ProjectReportsResp>(
+} = await useFetch<ProjectReportsResp | ProjectReportsChargebackResp>(
   () => `/api/v1/reports/project/${encodeURIComponent(code.value)}`,
   {
     query: computed(() => ({ ...windowQuery.value, src: rs.src.value ?? undefined })),
@@ -236,6 +265,23 @@ const {
     immediate: false,
   },
 )
+const reportsData = computed<ProjectReportsResp | null>(() =>
+  reportsPayload.value && reportsPayload.value.lane !== 'chargeback' ? reportsPayload.value : null,
+)
+const reportsCb = computed<ProjectReportsChargebackResp | null>(() =>
+  reportsPayload.value?.lane === 'chargeback' ? reportsPayload.value : null,
+)
+
+const echoedLane = computed<SpendLens>(
+  () => (payload.value ?? reportsPayload.value)?.lane ?? 'usage',
+)
+const shownLane = computed<SpendLens>({
+  get: () => echoedLane.value,
+  set: (v: SpendLens) => {
+    lane.value = v
+  },
+})
+
 watch(
   reportsDepthEligible,
   (eligible) => {
@@ -310,9 +356,9 @@ function reportsBarWidth(usd: number): string {
   return reportsBarMax.value > 0 ? `${Math.min(100, (usd / reportsBarMax.value) * 100).toFixed(1)}%` : '0%'
 }
 const reportsWindowWord = computed(() => {
-  const w = reportsData.value?.window
+  const w = reportsPayload.value?.window
   if (!w) return ''
-  return w.is_month ? monthWordOf(w.month) : `${w.from} → ${w.to}`
+  return w.is_month && w.month ? monthWordOf(w.month) : `${w.from} → ${w.to}`
 })
 
 const reportsPace = computed(() => {
@@ -343,7 +389,7 @@ function monthWordOf(month: string): string {
   )
 }
 const windowWord = computed(() => {
-  const w = data.value?.window
+  const w = payload.value?.window
   if (!w) return ''
   return w.is_month ? monthWordOf(w.month!) : `${w.from} → ${w.to}`
 })
@@ -661,9 +707,10 @@ const concentrationPct = computed(() => {
   return c == null ? null : Math.round(c * 100)
 })
 const exportFilename = computed(() => {
-  const w = data.value?.window
+  const w = payload.value?.window
   const stamp = w?.is_month ? w.month : w ? `${w.from}_${w.to}` : (todayIso.value?.slice(0, 7) ?? 'window')
-  return `tokenscope-project-${code.value}-team-${stamp}.csv`
+  const lens = echoedLane.value === 'chargeback' ? '-chargeback' : ''
+  return `tokenscope-project-${code.value}-team${lens}-${stamp}.csv`
 })
 
 // Rollup honesty for the (i): the velocity flag is the ONE cron-fed figure
@@ -690,35 +737,35 @@ const memberIngestOnlyTools = computed(
 
 <template>
   <div v-if="session" class="max-w-[1400px] mx-auto px-10 py-8 pb-20" data-testid="project-dashboard">
-    <template v-if="data">
+    <template v-if="payload">
       <UiPageHead
         eyebrow="My projects"
-        :title="data.project.display_name"
-        :sub="`${data.project.code} · ${data.project.type}${data.project.wbs_code ? ` · WBS ${data.project.wbs_code}` : ''}${data.project.ended ? ' · ended' : data.project.end_date ? ` · ends ${data.project.end_date.slice(0, 10)}` : ''}`"
-        :crumbs="['My projects', data.project.code]"
+        :title="payload.project.display_name ?? payload.project.code"
+        :sub="`${payload.project.code} · ${payload.project.type}${payload.project.wbs_code ? ` · WBS ${payload.project.wbs_code}` : ''}${payload.project.ended ? ' · ended' : payload.project.end_date ? ` · ends ${payload.project.end_date.slice(0, 10)}` : ''}`"
+        :crumbs="['My projects', payload.project.code]"
       >
         <template #actions>
-          <UiBadge v-if="data.velocity.is_flagged" kind="rag-amber" data-testid="velocity-flag">
+          <UiBadge v-if="data?.velocity.is_flagged" kind="rag-amber" data-testid="velocity-flag">
             velocity {{ Math.round((data.velocity.delta_pct ?? 0) * 100) }}% above 4-week mean
           </UiBadge>
         </template>
       </UiPageHead>
 
       <div class="space-y-5">
-        <!-- Window presets (D16) — the page's ONE window control. -->
-        <div class="flex items-center gap-3 flex-wrap">
+        <!-- Window presets (D16) — the page's ONE window control — and the lens. -->
+        <div class="flex items-start gap-3 flex-wrap">
           <DateRangeControl />
+          <LaneToggle v-model="shownLane" :captions="PROJECT_LENS_CAPTIONS" />
         </div>
 
-        <!-- §A once with (i) (fix 6) + the chip row (D14) instead of freshness prose. -->
-        <div class="flex items-center gap-2 flex-wrap">
-          <UiBadge kind="neutral" data-testid="proj-lane-pill">§A · usage lane</UiBadge>
+        <!-- The lens once with (i) (fix 6) + the chip row (D14) instead of freshness prose. -->
+        <div v-if="data" class="flex items-center gap-2 flex-wrap">
+          <UiBadge kind="neutral" data-testid="proj-lane-pill">§A · attributed usage</UiBadge>
           <InfoDot label="About this page's lane">
-            Indicative attributed usage (§A). This page never shows chargeback — stated once
-            instead of rendering a toggle that cannot change anything. Every figure follows the
-            selected window and is live off the §A lane; the velocity flag alone comes from the
-            cron-refreshed rollup<template v-if="aggregateAge">, last refreshed
-              {{ aggregateAge }} ago</template>.
+            Attributed usage (§A). Every figure follows the selected window and is live off the
+            §A lane; the velocity flag alone comes from the cron-refreshed
+            rollup<template v-if="aggregateAge">, last refreshed {{ aggregateAge }} ago</template>.
+            Switch to Chargeback for this project's share of the bill.
           </InfoDot>
           <CcHeaderNotes
             :provider-states="data.providerStates"
@@ -726,7 +773,31 @@ const memberIngestOnlyTools = computed(
             lane="usage"
           />
         </div>
+        <div v-else class="flex items-center gap-2 flex-wrap">
+          <UiBadge kind="neutral" data-testid="proj-lane-pill">§B · bill chargeback</UiBadge>
+          <InfoDot label="About this page's lane">
+            {{ PROJECT_LENS_COPY.chargeback.caption }} Budgets and allocations still read
+            attributed usage.
+          </InfoDot>
+        </div>
 
+        <ProjectChargebackView
+          v-if="cbData"
+          :block="cbData.chargeback"
+          :window="cbData.window"
+          :window-word="windowWord"
+        >
+          <template #actions>
+            <ExportCsvButton
+              v-if="cbData.viewer.access === 'member'"
+              :endpoint="`/api/v1/me/projects/${encodeURIComponent(code)}/team/export`"
+              :params="windowQuery"
+              :filename="exportFilename"
+            />
+          </template>
+        </ProjectChargebackView>
+
+        <template v-if="data">
         <!-- Headline band + hero tiles (fix 2). -->
         <section data-testid="project-hero-band">
           <div class="flex items-baseline gap-3 flex-wrap border-b border-calm-2 pb-3 mb-4">
@@ -737,7 +808,7 @@ const memberIngestOnlyTools = computed(
               data-testid="project-hero-total"
             >{{ fmtUsd(data.budget.window_cost_usd) }}</span>
             <span class="text-[12.5px] text-carbon-2">
-              attributed usage · this project<template v-if="data.window.is_month">
+              {{ PROJECT_LENS_COPY.usage.basis }}<template v-if="data.window.is_month">
                 · day {{ data.window.days_elapsed }} of {{ data.window.days_in_window }}</template>
             </span>
           </div>
@@ -1047,6 +1118,7 @@ const memberIngestOnlyTools = computed(
             No active budget period — ask your manager or admin to set one.
           </p>
         </UiCard>
+        </template>
       </div>
     </template>
 
@@ -1058,18 +1130,18 @@ const memberIngestOnlyTools = computed(
          ABSENT here, deliberately (prototype `:766`): the team table, cache
          economics, the activity mix and untagged pressure. Those are the team's
          working surfaces, not an observer's. -->
-    <template v-else-if="reportsData">
+    <template v-else-if="reportsPayload">
       <nav class="text-[12px] text-carbon-3 mb-2 flex items-center gap-1.5" data-testid="project-reports-crumb">
         <NuxtLink :to="reportsBackRoute" class="hover:text-brand-harmony hover:underline">Reports</NuxtLink>
         <span aria-hidden="true">›</span>
-        <span class="text-carbon-1 font-semibold">{{ reportsData.project.display_name }}</span>
+        <span class="text-carbon-1 font-semibold">{{ reportsPayload.project.display_name ?? reportsPayload.project.code }}</span>
       </nav>
       <p
-        v-if="reportsData.scope.src"
+        v-if="reportsPayload.scope?.src"
         class="text-[12px] text-carbon-3 mb-3"
         data-testid="project-reports-provenance"
       >
-        from Reports · {{ reportsData.scope.src }} · {{ reportsWindowWord }}
+        from Reports · {{ reportsPayload.scope.src }} · {{ reportsWindowWord }}
         <InfoDot label="What the drill carried">
           The entry scope and window ride the link and this page echoes them, so going back restores
           the report you came from exactly — even after a refresh or on a shared link.
@@ -1078,18 +1150,36 @@ const memberIngestOnlyTools = computed(
 
       <UiPageHead
         eyebrow="Reports"
-        :title="reportsData.project.display_name"
-        :sub="`${reportsData.project.code} · reports depth — you are not a member; admitted by your reports grant`"
+        :title="reportsPayload.project.display_name ?? reportsPayload.project.code"
+        :sub="`${reportsPayload.project.code} · reports depth — you are not a member; admitted by your reports grant`"
       />
 
       <div class="space-y-5">
-        <div class="flex items-center gap-3 flex-wrap">
+        <div class="flex items-start gap-3 flex-wrap">
           <DateRangeControl />
+          <LaneToggle v-model="shownLane" :captions="PROJECT_LENS_CAPTIONS" />
         </div>
-        <div class="flex items-center gap-2 flex-wrap">
-          <UiBadge kind="neutral" data-testid="proj-reports-lane-pill">§A · usage lane</UiBadge>
+        <div v-if="reportsCb" class="flex items-center gap-2 flex-wrap">
+          <UiBadge kind="neutral" data-testid="proj-reports-lane-pill">§B · bill chargeback</UiBadge>
           <InfoDot label="About this page's lane">
-            Chargeback for this project's cost centres lives on the Finance tab, not here.
+            {{ PROJECT_LENS_COPY.chargeback.caption }} Budgets and allocations still read
+            attributed usage.
+          </InfoDot>
+        </div>
+        <ProjectChargebackView
+          v-if="reportsCb"
+          :block="reportsCb.chargeback"
+          :window="reportsCb.window"
+          :window-word="reportsWindowWord"
+          :drill-target="contributorTarget"
+        />
+
+        <template v-if="reportsData">
+        <div class="flex items-center gap-2 flex-wrap">
+          <UiBadge kind="neutral" data-testid="proj-reports-lane-pill">§A · attributed usage</UiBadge>
+          <InfoDot label="About this page's lane">
+            Attributed usage (§A) for the whole project. Switch to Chargeback for its share of
+            the bill.
           </InfoDot>
           <CcHeaderNotes
             :provider-states="reportsData.meta.providerStates"
@@ -1198,6 +1288,7 @@ const memberIngestOnlyTools = computed(
             </InfoDot>
           </p>
         </UiCard>
+        </template>
       </div>
     </template>
 

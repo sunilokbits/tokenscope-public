@@ -182,7 +182,7 @@ async function toggleWorker(w: WorkerEnablementRow) {
           @toggle-runs="toggleRuns(w.name)"
         >
           <template #runs>
-            <AdminWorkerRunsPanel :worker="w.name" />
+            <AdminWorkerRunsPanel :worker="w.name" :can-open-detail="canToggle" />
           </template>
         </AdminWorkerControlRow>
       </ul>

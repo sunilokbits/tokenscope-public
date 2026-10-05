@@ -590,6 +590,25 @@ describe('unhomed cause split', () => {
    * so the view homes her nowhere), and the flipped operator finds the cost-owning
    * child, yields a NULL cause, and drops her $124 out of every bucket.
    */
+  it('a cost-owning unit in ANOTHER region at a colliding path does not home or reclassify anyone', async () => {
+    // org_unit.path is unique only per region (idor-data-drizzle-001). EMEA gets
+    // a live cost-owning unit at oscar's exact path; his own region still has no
+    // cost-owning ancestor, so he must stay in no-cost-owning-ancestor.
+    await t.client`INSERT INTO org_unit (region_id, path, code, display_name, unit_type, is_cost_owning_unit)
+      SELECT id, 'orphanb'::ltree, 'collider-orphanb', 'EMEA Collider', 'bu', true FROM region WHERE code = 'emea'`
+    try {
+      const r = await computeUnhomedCauses(t.db, KO_JUN_WINDOW, JUN)
+      expect(usd(r, 'no-cost-owning-ancestor')).toBe('235.000000')
+      expect(r.unhomedUsd).toBe('2860.000000')
+      expect(r.residualUsd).toBe('0.000000')
+      expect(r.reconciles).toBe(true)
+      const rows = r.worklists.find((x) => x.cause === 'no-cost-owning-ancestor')!.rows
+      expect(rows.map((x) => x.sublabel)).toContain('orphan-b')
+    } finally {
+      await t.client`DELETE FROM org_unit WHERE code = 'collider-orphanb'`
+    }
+  })
+
   it('reads ancestry upward: a cost-owning CHILD does not home a team', async () => {
     const r = await computeUnhomedCauses(t.db, KO_JUN_WINDOW, JUN)
 

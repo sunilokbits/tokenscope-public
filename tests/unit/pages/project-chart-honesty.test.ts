@@ -149,6 +149,7 @@ async function mountPage(data: Payload, clockAt = CLIENT_TODAY) {
     src: ref<string | null>(null),
     patch: vi.fn(),
   }))
+  vi.stubGlobal('usePersonalLens', () => ref<'usage' | 'chargeback'>('usage'))
   vi.stubGlobal('useFetch', () => ({
     data: ref(data),
     pending: ref(false),

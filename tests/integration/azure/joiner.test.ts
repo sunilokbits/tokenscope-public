@@ -976,6 +976,47 @@ describe('selectRecentJoinableSessionIds (registry azure-monitor-read pre-query)
     }
   })
 
+  it('CAP ORDERING: a provisional flood above the cap never displaces a confirmed emitting device (CS-EDGE-01)', async () => {
+    // The flood is fresher on every other key (enrolled and minted NOW), so
+    // only the confirmed-before-provisional rank keeps CONFIRMED under the cap.
+    const CONFIRMED = '9a1e0000-0000-4000-8000-0000000000f0'
+    const flood = [1, 2, 3, 4, 5, 6].map((i) => `9a1e0000-0000-4000-8000-0000000000f${i}`)
+    await t.client.unsafe(`
+      INSERT INTO instance_attestation
+        (instance_id, principal_oid, principal_email, teammate_id, project_code_hash,
+         raw_project_code, tool, session_token_hash, ts_start, ts_actual_end, last_bearer_at,
+         region_id, org_unit_id, cost_owning_unit_id, identity_state, claimed_email, attestation_state)
+      VALUES
+        ('${CONFIRMED}', 'oid', 'dev@i.com', '33333333-3333-3333-3333-333333333333', 'h-afl-aii', 'CSL-AII',
+         'claude-code', 'hFloodConf', NOW() - INTERVAL '20 days', NULL, NOW() - INTERVAL '1 minute',
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222',
+         'confirmed', NULL, 'attested'),
+        ${flood
+          .map(
+            (id, i) => `('${id}', 'provisional:${id}', NULL, '33333333-3333-3333-3333-333333333333', NULL, NULL,
+         'claude-code', 'hFloodProv${i}', NOW(), NULL, NOW(),
+         '11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222',
+         'provisional', 'flood-${i}@x.test', 'unassigned')`,
+          )
+          .join(',\n        ')};
+    `)
+    const prior = process.env.NUXT_JOINER_INSTANCE_CAP
+    process.env.NUXT_JOINER_INSTANCE_CAP = '3'
+    try {
+      const sel = await selectJoinableInstances(t.db)
+      // Vacuity guard: the flood alone exceeds the cap, so truncation happened.
+      expect(sel.capHit).toBe(3)
+      expect(sel.ids).toContain(CONFIRMED)
+      for (const id of flood) expect(sel.ids).not.toContain(id)
+    } finally {
+      if (prior === undefined) delete process.env.NUXT_JOINER_INSTANCE_CAP
+      else process.env.NUXT_JOINER_INSTANCE_CAP = prior
+      await t.client.unsafe(
+        `DELETE FROM instance_attestation WHERE instance_id IN ('${CONFIRMED}', ${flood.map((f) => `'${f}'`).join(', ')})`,
+      )
+    }
+  })
+
   it('a never-minted OPEN instance ranks by ts_start and does NOT float above live ones', async () => {
     // COALESCE(last_bearer_at, ts_start) must rank a never-minted row by its
     // enrolment date. If it sorted NULLS FIRST instead, every never-minted row

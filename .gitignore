@@ -76,3 +76,6 @@ core
 core.*
 # TokenScope repo tag (carries device config; do not commit)
 .claude/settings.local.json
+# Security-audit machine outputs: SARIF goes to code scanning, the SBOM is regenerated per run
+docs/security-audit-output/findings.sarif
+docs/security-audit-output/findings.cyclonedx.json

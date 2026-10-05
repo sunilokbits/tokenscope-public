@@ -145,6 +145,9 @@ A self-referential hierarchy (region → BU → team → practice) stored as a
 PostgreSQL `LTREE` materialised path, so ancestor/descendant queries are a
 single GIST-indexed operator. Any level can be flagged a cost-owning unit
 (the P&L owner) via `is_cost_owning_unit`. Carries the provenance triple.
+`path` is unique only within a region, so a unit's cost owner is its nearest
+live cost-owning ancestor **in the same region** (`v_org_unit_cost_owner`, mig
+0147); both §B bill views read that one map.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -847,6 +850,14 @@ Two views consume this table on the two sides of the §A/§B line
   carried `tool` in its grain, so the split flows through unchanged; its consumers
   (finance/practice rollups, CSV export, the reporting UI) now group by `tool` to
   render each Claude surface as its own chargeback lane.
+- **`v_finance_project_overlay`** (mig 0059, redefined mig 0146) — the chargeable bill
+  of `v_finance_bill_chargeback` split per `(teammate, day, tool)` across projects
+  by tagged share.
+  - **Weights:** OTel (the population the needs-tagging residual subtracts) plus
+    `unaccounted_usage` rows. Tagged rows weigh toward their project; untagged
+    and dismissed rows weigh toward `project_id` NULL.
+  - **Footing:** one cell's rows sum to its `bill_usd`.
+  - **Readers:** the project page's chargeback lens and the Finance project drill.
 
 ### reconciliation_record
 

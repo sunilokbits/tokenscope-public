@@ -911,7 +911,7 @@ async function refreshAfterPlacement() {
              on without a click. This is what turns a one-off clean-up into
              something that stops the cluster coming back next month. -->
         <PlacementRuleOffer
-          v-if="ruleOffer && !rulesError"
+          v-if="isPlatformAdmin && ruleOffer && !rulesError"
           class="w-full"
           :teammate-ids="ruleOffer.teammateIds"
           :rows="ruleOffer.rows"
@@ -922,7 +922,7 @@ async function refreshAfterPlacement() {
           @dismiss="ruleOffer = null"
         />
         <UiAuxFetchError
-          v-else-if="ruleOffer"
+          v-else-if="isPlatformAdmin && ruleOffer"
           :error="rulesError"
           label="the placement rules"
           testid="rule-offer-rules-error"

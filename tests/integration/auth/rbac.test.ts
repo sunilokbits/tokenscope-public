@@ -138,15 +138,23 @@ describe('requireRegionScope — explicit allowlist, 403 default (CORE-3)', () =
 describe('assertProjectScope — explicit allowlist, 403 default (CORE-3)', () => {
   const project = { regionId: DEV.regionId, couPath: 'apac.services.delta' }
 
-  async function projectScope(session: Session) {
+  /** Stands in for the request transaction: answers the region-root probe. */
+  const homeTx = (placedBelowRoot: boolean) =>
+    ({ execute: async () => [{ ok: placedBelowRoot }] }) as unknown as Parameters<typeof assertProjectScope>[2]
+
+  async function projectScope(session: Session, tx = homeTx(true)) {
     const ev = makeEvent(session)
-    return assertProjectScope(ev as unknown as Parameters<typeof assertProjectScope>[0], project)
+    return assertProjectScope(ev as unknown as Parameters<typeof assertProjectScope>[0], project, tx)
   }
 
   it('manager within the subtree passes; platform-admin pass', async () => {
     await expect(projectScope({ ...DEV, role: 'manager' })).resolves.toBeUndefined()
     await expect(projectScope({ ...DEV, role: 'platform-admin' })).resolves.toBeUndefined()
     await expect(projectScope({ ...DEV, role: 'platform-admin' })).resolves.toBeUndefined()
+  })
+
+  it('manager whose OWN home is the region root → 403, even inside the subtree', async () => {
+    await expect(projectScope({ ...DEV, role: 'manager' }, homeTx(false))).rejects.toMatchObject({ statusCode: 403 })
   })
 
   it('manager OUTSIDE the subtree → 403', async () => {
@@ -190,6 +198,7 @@ describe('assertProjectScope — explicit allowlist, 403 default (CORE-3)', () =
             typeof assertProjectScope
           >[0],
           { regionId: bad, couPath: project.couPath },
+          homeTx(true),
         ),
       ).rejects.toMatchObject({ statusCode: 403 })
       // BOTH blank — the `undefined === undefined` grant this must never be
@@ -199,6 +208,7 @@ describe('assertProjectScope — explicit allowlist, 403 default (CORE-3)', () =
             typeof assertProjectScope
           >[0],
           { regionId: bad, couPath: project.couPath },
+          homeTx(true),
         ),
       ).rejects.toMatchObject({ statusCode: 403 })
     }

@@ -139,18 +139,9 @@ describe('writeRepoTag change-detection', () => {
     expect(s.env.OTEL_RESOURCE_ATTRIBUTES).toBe(
       `tokenscope.instance_id=inst-A,project.code_hash=${CODE_HASH},tool=claude-code`,
     )
-    // The device env is copied (bearer/OAuth destinations stay), EXCEPT the
-    // telemetry-enabling keys Claude Code refuses from a project file (2.1.283+):
-    // those apply from the user-level file, and a repo copy only drew a warning.
-    expect(s.env.TOKENSCOPE_BEARER_ENDPOINT).toBe('https://api/api/v1/instances/inst-A/bearer')
-    for (const k of REFUSED) expect(s.env).not.toHaveProperty(k)
-    expect(s.env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT).toBe('https://login/token')
-    expect(s.env.TOKENSCOPE_OAUTH_CLIENT_ID).toBe('cid')
-    // S1 fix 4: the durable OAuth REFRESH token specifically is stripped — the
-    // one key that would otherwise let a hostile repo exfiltrate it just by
-    // being cloned. otel-headers-helper.sh falls back to the device's own
-    // state-dir credential store for this key.
-    expect(s.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBeUndefined()
+    // SS-CP-2: the env block is an allowlist; every other key applies from the
+    // user-level file (per-key merge), and the helper reads its own store.
+    expect(Object.keys(s.env)).toEqual(['OTEL_RESOURCE_ATTRIBUTES'])
     expect(s.otelHeadersHelper).toContain('0.1.3')
   })
 
@@ -208,85 +199,29 @@ describe('writeRepoTag change-detection', () => {
     expect(r.instanceDrifted).toBe(false)
   })
 
-  it('refreshes frozen credentials: a legacy session-token pin picks up the current OAuth env', () => {
-    // Old frozen repo env: legacy 12h token, NO OAuth refresh creds.
-    writeRepoTag({
-      cwd,
-      enrolment: enrolment({
-        env: {
-          OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=inst-A,tool=claude-code',
-          TOKENSCOPE_BEARER_ENDPOINT: 'https://api/api/v1/instances/inst-A/bearer',
-          TOKENSCOPE_SESSION_TOKEN: 'legacy-12h-token',
-        },
-      }),
-      codeHash: CODE_HASH,
-    })
-    expect(readRepo(cwd).env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBeUndefined()
-    // Re-enrol added durable OAuth creds to global → repo picks up the
-    // endpoint/client-id (S1 fix 4: NOT the refresh token, which is now
-    // stripped from every repo copy regardless of what global carries).
-    const r = writeRepoTag({ cwd, enrolment: enrolment(), codeHash: CODE_HASH })
-    expect(r.changed).toBe(true)
-    const s = readRepo(cwd)
-    expect(s.env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT).toBe('https://login/token')
-    expect(s.env.TOKENSCOPE_OAUTH_CLIENT_ID).toBe('cid')
-    expect(s.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBeUndefined()
+  it('REPLACES the repo env wholesale: a key an earlier full copy left behind is ABSENT after re-derive (MEDIUM-1)', () => {
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+    writeFileSync(
+      join(cwd, '.claude', 'settings.local.json'),
+      JSON.stringify({ env: { OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=inst-A,tool=claude-code', TOKENSCOPE_SESSION_TOKEN: 'legacy-12h-token' } }),
+    )
+    writeRepoTag({ cwd, enrolment: enrolment(), codeHash: CODE_HASH })
+    expect(Object.keys(readRepo(cwd).env)).toEqual(['OTEL_RESOURCE_ATTRIBUTES'])
   })
 
-  it('REPLACES the repo env wholesale: a key the current global stopped emitting is ABSENT after re-derive (MEDIUM-1)', () => {
-    // Pin under a global whose env carries a legacy session token (key X).
-    writeRepoTag({
-      cwd,
-      enrolment: enrolment({
-        env: {
-          OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=inst-A,tool=claude-code',
-          TOKENSCOPE_BEARER_ENDPOINT: 'https://api/api/v1/instances/inst-A/bearer',
-          TOKENSCOPE_SESSION_TOKEN: 'legacy-12h-token', // key X
-        },
-      }),
-      codeHash: CODE_HASH,
-    })
-    expect(readRepo(cwd).env.TOKENSCOPE_SESSION_TOKEN).toBe('legacy-12h-token')
-
-    // Re-derive under a current global WITHOUT key X (OAuth-only). An additive
-    // merge would leave the dead legacy token at rest; a wholesale REPLACE drops it.
-    writeRepoTag({
-      cwd,
-      enrolment: enrolment({
-        env: {
-          OTEL_RESOURCE_ATTRIBUTES: 'tokenscope.instance_id=inst-A,tool=claude-code',
-          TOKENSCOPE_BEARER_ENDPOINT: 'https://api/api/v1/instances/inst-A/bearer',
-          TOKENSCOPE_OAUTH_REFRESH_TOKEN: 'rt-current',
-          TOKENSCOPE_OAUTH_TOKEN_ENDPOINT: 'https://login/token',
-          TOKENSCOPE_OAUTH_CLIENT_ID: 'cid',
-        },
-      }),
-      codeHash: CODE_HASH,
-    })
-    const s = readRepo(cwd)
-    expect(s.env.TOKENSCOPE_SESSION_TOKEN).toBeUndefined() // dead credential gone
-    expect(s.env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT).toBe('https://login/token')
-    expect(s.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBeUndefined() // S1 fix 4: stripped regardless
-  })
-
-  it('keeps the read credential OUT of the per-repo copy (ADR-0005 E1 — global-only identity token)', () => {
+  it('writes ONLY the allowlisted env key: credentials and third-party keys in the device env never reach the repo file (SS-CP-2)', () => {
     const e = enrolment()
     e.env.TOKENSCOPE_READ_REFRESH_TOKEN = 'read-rt'
     e.env.TOKENSCOPE_READ_CLIENT_ID = 'read-cid'
+    e.env.ANTHROPIC_API_KEY = 'sk-third-party'
+    e.env.AWS_BEARER_TOKEN_BEDROCK = 'bedrock-token'
     writeRepoTag({ cwd, enrolment: e, codeHash: CODE_HASH })
-    const s = readRepo(cwd)
-    // The higher-privilege read cred must NOT spread at rest into the repo file…
-    expect(s.env.TOKENSCOPE_READ_REFRESH_TOKEN).toBeUndefined()
-    expect(s.env.TOKENSCOPE_READ_CLIENT_ID).toBeUndefined()
-    // …the rest of the emit credential IS copied (the repo still emits)…
-    expect(s.env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT).toBe('https://login/token')
-    expect(s.env.TOKENSCOPE_OAUTH_CLIENT_ID).toBe('cid')
-    // …EXCEPT the durable refresh token itself (S1 fix 4 — walks the SAME
-    // sibling path this test already pins for the read credential).
-    expect(s.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBeUndefined()
+    expect(readRepo(cwd).env).toEqual({
+      OTEL_RESOURCE_ATTRIBUTES: `tokenscope.instance_id=inst-A,project.code_hash=${CODE_HASH},tool=claude-code`,
+    })
   })
 
-  it('S1 fix 4 — a PRE-EXISTING repo file carrying TOKENSCOPE_OAUTH_REFRESH_TOKEN is rewritten WITHOUT it, every other key surviving (self-healing for the key it removes)', () => {
+  it('S1 fix 4 — a PRE-EXISTING repo file carrying TOKENSCOPE_OAUTH_REFRESH_TOKEN is rewritten WITHOUT it (self-healing for the key it removes)', () => {
     // Simulate a repo tagged BEFORE this fix landed: the refresh token sits at
     // rest in the repo file already.
     mkdirSync(join(cwd, '.claude'), { recursive: true })
@@ -313,9 +248,7 @@ describe('writeRepoTag change-detection', () => {
     expect(r.changed).toBe(true)
     const s = readRepo(cwd)
     expect(s.env.TOKENSCOPE_OAUTH_REFRESH_TOKEN).toBeUndefined() // removed at rest
-    expect(s.env.TOKENSCOPE_BEARER_ENDPOINT).toBe('https://api/api/v1/instances/inst-A/bearer')
-    expect(s.env.TOKENSCOPE_OAUTH_TOKEN_ENDPOINT).toBe('https://login/token')
-    expect(s.env.TOKENSCOPE_OAUTH_CLIENT_ID).toBe('cid')
+    expect(Object.keys(s.env)).toEqual(['OTEL_RESOURCE_ATTRIBUTES'])
   })
 
   it('.gitignore gains the repo-tag entry idempotently', () => {
@@ -482,6 +415,47 @@ function writeGlobal(home: string, { instance = 'inst-A', helper = pinned('0.1.3
  * is a no-op in the self-heal tests (it runs the REAL emit path otherwise); the
  * dedicated health-warning tests below drive that path via the sentinel instead.
  */
+describe('writeRepoTag — refuses a git-tracked settings.local.json (SS-CP-2)', () => {
+  const savedPluginRoot = process.env.CLAUDE_PLUGIN_ROOT
+  beforeEach(() => {
+    delete process.env.CLAUDE_PLUGIN_ROOT
+    rmSync(join(cwd, '.git'), { recursive: true, force: true })
+    execFileSync('git', ['init', '-q'], { cwd })
+    mkdirSync(join(cwd, '.claude'), { recursive: true })
+  })
+  afterEach(() => {
+    if (savedPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT
+    else process.env.CLAUDE_PLUGIN_ROOT = savedPluginRoot
+  })
+
+  it('a tracked file is left byte-identical and the result says trackedRefused', () => {
+    const p = join(cwd, '.claude', 'settings.local.json')
+    const committed = JSON.stringify({ env: { SOMETHING: 'committed' } })
+    writeFileSync(p, committed)
+    execFileSync('git', ['add', '-f', '.claude/settings.local.json'], { cwd })
+    const r = writeRepoTag({ cwd, enrolment: enrolment(), codeHash: CODE_HASH })
+    expect(r).toEqual({ settingsPath: null, changed: false, healed: false, instanceDrifted: false, trackedRefused: true })
+    expect(readFileSync(p, 'utf8')).toBe(committed)
+  })
+
+  it('a tracked file deleted from disk but still in the index is not recreated', () => {
+    const p = join(cwd, '.claude', 'settings.local.json')
+    writeFileSync(p, JSON.stringify({ env: {} }))
+    execFileSync('git', ['add', '-f', '.claude/settings.local.json'], { cwd })
+    rmSync(p)
+    const r = writeRepoTag({ cwd, enrolment: enrolment(), codeHash: CODE_HASH })
+    expect(r.trackedRefused).toBe(true)
+    expect(existsSync(p)).toBe(false)
+  })
+
+  it('an untracked existing file in a real repo is still rewritten (no over-refusal)', () => {
+    writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ env: {} }))
+    const r = writeRepoTag({ cwd, enrolment: enrolment(), codeHash: CODE_HASH })
+    expect(r.changed).toBe(true)
+    expect(r.trackedRefused).toBeUndefined()
+  })
+})
+
 function runHook(home: string, repo: string, pluginRoot: string = join(home, 'no-plugin')) {
   // Pin the plugin state dir explicitly to the sandbox home. stateDir() is now
   // anchored on the passwd home (HOME-leak-proof), so a HOME override alone no
@@ -539,6 +513,19 @@ describe('session-start hook (end-to-end)', () => {
     writeGlobal(home, { helper: pinnedInstalled('0.1.3') })
     runHook(home, repo)
     expect(readRepo(repo).otelHeadersHelper).toContain('0.1.3') // healed, not skipped
+  })
+
+  it('the real hook leaves a git-tracked repo file untouched and says why', () => {
+    writeGlobal(home, {})
+    rmSync(join(repo, '.git'), { recursive: true, force: true })
+    execFileSync('git', ['init', '-q'], { cwd: repo })
+    mkdirSync(join(repo, '.claude'), { recursive: true })
+    const p = join(repo, '.claude', 'settings.local.json')
+    writeFileSync(p, '{}\n')
+    execFileSync('git', ['add', '-f', '.claude/settings.local.json'], { cwd: repo })
+    const out = runHook(home, repo)
+    expect(readFileSync(p, 'utf8')).toBe('{}\n')
+    expect(out).toContain('tracked by git')
   })
 
   it('the real hook writes the repo tag without the telemetry-enabling keys', () => {

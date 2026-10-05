@@ -49,7 +49,7 @@
  * RFC-9457 error shape: matches validate-session.ts + the rest of the
  * codebase. type/title/status/detail under `data`.
  */
-import { defineEventHandler, getHeader, getRequestURL, createError } from 'h3'
+import { defineEventHandler, getHeader, createError, type H3Event } from 'h3'
 
 const FRONT_DOOR_HEADER = 'x-azure-fdid'
 
@@ -58,6 +58,17 @@ const FRONT_DOOR_HEADER = 'x-azure-fdid'
 // replicas unhealthy and trigger a restart loop. Keep this list tight —
 // every excluded path is an attack surface that skips the WAF.
 const EXCLUDED_PATHS = new Set<string>(['/api/health'])
+
+// The exemption must compare the path the router dispatches (event.path up to
+// '?', not URL-normalised): getRequestURL resolves dot segments, so
+// `/api/v1/mcp/x/../../../health` would read as `/api/health` here while the
+// router serves the MCP catch-all. No other path rejection: `.well-known`,
+// OAuth query strings, MCP subpaths and /_nuxt assets must keep passing.
+function routedPath(event: H3Event): string {
+  const path = event.path
+  const q = path.indexOf('?')
+  return q === -1 ? path : path.slice(0, q)
+}
 
 // Reject. Log path + coarse header-presence signal so an operator can
 // debug "the API stopped responding from my laptop" without us dumping
@@ -98,12 +109,12 @@ export default defineEventHandler((event) => {
   // ID is wired.
   if (!expected || expected.length === 0) {
     if (!required) return
-    const path = getRequestURL(event).pathname
+    const path = routedPath(event)
     if (EXCLUDED_PATHS.has(path)) return
     reject(path, false)
   }
 
-  const path = getRequestURL(event).pathname
+  const path = routedPath(event)
   if (EXCLUDED_PATHS.has(path)) return
 
   const received = getHeader(event, FRONT_DOOR_HEADER)

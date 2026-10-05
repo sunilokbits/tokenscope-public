@@ -78,9 +78,10 @@ function ev(opts: { session: Session; projectId: string; body: unknown }) {
 // Admin scoped to the region. orgPath is irrelevant for admins (region-scope path).
 const admin = (): Session =>
   ({ teammateId: ADMIN_ID, email: 'pa-admin@x.test', displayName: 'Admin', role: 'admin', regionId, orgPath: 'pa' } as Session)
-// Manager (PM) whose org subtree ('pa') is an ancestor of the project's cost-owning unit ('pa.prac').
+// Manager (PM) homed at the project's cost-owning unit ('pa.prac'), a genuine
+// non-root placement (assertProjectScope refuses a region-root home).
 const manager = (): Session =>
-  ({ teammateId: MANAGER_ID, email: 'pa-mgr@x.test', displayName: 'Manager', role: 'manager', regionId, orgPath: 'pa' } as Session)
+  ({ teammateId: MANAGER_ID, email: 'pa-mgr@x.test', displayName: 'Manager', role: 'manager', regionId, orgPath: 'pa.prac' } as Session)
 // Manager whose org subtree ('pa.other') does NOT contain the project's
 // cost-owning unit ('pa.prac') → assertProjectScope must reject 403.
 const managerOutOfScope = (): Session =>

@@ -942,7 +942,12 @@ export async function selectJoinableInstances(
     -- the cap a long-enrolled instance that is emitting RIGHT NOW must outrank a
     -- newer one that has been dormant for weeks — ranking by enrolment date is the
     -- same age-is-not-liveness mistake the dead zone came from.
-    ORDER BY (sa.ts_actual_end IS NULL) DESC, COALESCE(sa.last_bearer_at, sa.ts_start) DESC
+    -- Confirmed before provisional, within each open/closed group: a provisional
+    -- row is minted by the unauthenticated enrol door, so a flood of them must
+    -- never displace a confirmed device under the cap (CS-EDGE-01).
+    ORDER BY (sa.ts_actual_end IS NULL) DESC,
+             (sa.identity_state <> 'provisional') DESC,
+             COALESCE(sa.last_bearer_at, sa.ts_start) DESC
     -- Over-fetch by ONE to tell "exactly at the cap" from "truncated by the cap".
     -- rows.length === limit alone cannot: a population of exactly the cap is fully
     -- scanned yet would report a cap hit, paging an operator and sending them to

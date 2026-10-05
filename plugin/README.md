@@ -84,7 +84,7 @@ To run the plugins against your own TokenScope deployment:
 2. **Set your host** (for example `https://tokenscope.your-company.example`) in all
    four places it is baked:
    - `plugin/scripts/api-base.mjs` — `DEFAULT_API_BASE`
-   - `plugin/.mcp.json` — the default inside `${TOKENSCOPE_API_BASE:-…}`
+   - `plugin/.mcp.json` — the literal `url`
    - `copilot-plugin/.mcp.json` — the literal `url` (Copilot CLI does not expand
      variables there)
    - `copilot-plugin/scripts/enroll.mjs` — its own `DEFAULT_API_BASE`
@@ -114,7 +114,7 @@ the fork is the cleaner path for a team.
 
 | Var | Default | Purpose |
 |---|---|---|
-| `TOKENSCOPE_API_BASE` | the host baked into `scripts/api-base.mjs` | **Local development only.** Honoured only for a loopback value (`http://localhost:3450`); any other value is ignored. To target another deployment, see [Point the plugins at your deployment](#point-the-plugins-at-your-deployment). `plugin/.mcp.json` reads the same variable for the MCP server URL. |
+| `TOKENSCOPE_API_BASE` | the host baked into `scripts/api-base.mjs` | **Local development only.** Honoured only for a loopback value (`http://localhost:3450`); any other value is ignored. To target another deployment, see [Point the plugins at your deployment](#point-the-plugins-at-your-deployment). It does not move the MCP server: `plugin/.mcp.json` carries a literal URL, because a repository can set this variable. For a local server, register it at user scope with `claude mcp add --transport http --scope user tokenscope http://localhost:3450/api/v1/mcp`; the plugin's scripts discover that registration. |
 
 Tagging makes **no server call** at write time and needs no env var — the
 `project` prompt resolves the code from your memberships and hashes it locally.
@@ -169,32 +169,24 @@ you pick one, and it:
 
 - writes a committable `./.tokenscope` (`project.code: <code>`, preserving any
   existing fields) so the tag travels with the repo, then
-- writes the **repo-local** `./.claude/settings.local.json` (mode 0600): a copy
-  of the device's current global `env`, with `OTEL_RESOURCE_ATTRIBUTES`
-  overridden to
-  `tokenscope.instance_id=<DEVICE_SID>,project.code_hash=<sha256(code)>,tool=claude-code`,
-  and WITHOUT the telemetry-enabling keys (`CLAUDE_CODE_ENABLE_TELEMETRY`, the OTel
-  exporters, the logs endpoint and protocol). Claude Code merges the `env` blocks
-  **per key**, so those apply from the user settings (recent Claude Code versions
-  refuse them from a project file anyway), while the project tag applies from the
-  repo file.
-  The durable OAuth **refresh token** specifically is excluded
-  from the copy — the one credential a hostile repo could otherwise exfiltrate
-  merely by being cloned and opened — and `otel-headers-helper.sh` falls back to
-  the device's own state-dir credential store for it.
+- writes the **repo-local** `./.claude/settings.local.json` (mode 0600) with the
+  `otelHeadersHelper` path and ONE env key, `OTEL_RESOURCE_ATTRIBUTES`:
+  `tokenscope.instance_id=<DEVICE_SID>,project.code_hash=<sha256(code)>,tool=claude-code`.
+  Claude Code merges the `env` blocks **per key**, so every other key (exporter,
+  endpoints, credentials, and anything else you keep there) applies from your
+  user settings and is never copied into the repo. If that file is tracked by
+  git, nothing is written and the session start says so.
 
-The device session id + helper + OTLP config are reused from the global config,
-copied wholesale into the repo file on **every** `claude` launch in that repo —
-not merged by Claude, restated by us each time, which is what lets a plugin upgrade or re-enrol reach every tagged repo automatically.
+The device session id and helper path are restated from the global config on
+**every** `claude` launch in that repo, which is what lets a plugin upgrade or
+re-enrol reach every tagged repo automatically.
 Commit the `.tokenscope`; teammates who clone it just run the `project` prompt
 with no project (or let the SessionStart hook auto-apply it). Restart `claude`
 in the repo — OTel resource attrs are read at startup, so the **next** session
 is tagged.
 
 The project name/code is not emitted; the hash is a stable identifier, not a
-secret. (The full repo-local copy above — minus the refresh token — still sits
-at rest in the tagged repo's `settings.local.json`; that residual is an accepted
-risk, which is why the refresh token is left out of it.)
+secret.
 
 ## `.tokenscope` file
 
@@ -252,8 +244,9 @@ the same verdict in detail; for your spend breakdown use the `usage` prompt /
 The plugin registers a **remote MCP server** (`plugin/.mcp.json`) — a
 streamable-HTTP server at the deployed base + `/api/v1/mcp`, authenticated by
 OAuth 2.1 (no token to paste; the browser consent runs on first connect). It
-points at the same deployment as the rest of the plugin (`scripts/api-base.mjs`);
-`TOKENSCOPE_API_BASE` overrides it for local development.
+points at the same deployment as the rest of the plugin (`scripts/api-base.mjs`).
+Its URL is a literal; for local development, register a local server at user
+scope (see [Configure](#configure)).
 
 Over MCP the server exposes read tools (`list_my_projects`, `list_activity_types`,
 `my_usage`, `resolve_repo_project`) + a tag tool (`tag_session`), and **prompts**
@@ -270,8 +263,6 @@ Claude-specific surface.
   emitted; the hash is a stable identifier, not a secret.
 - The durable OAuth emit **refresh token** lives in `~/.claude/settings.json` on
   your machine (never commit it); the server stores only its HMAC. It auto-refreshes
-  short-lived access tokens — there is no legacy session token. It is deliberately
-  **excluded** from every per-repo `settings.local.json` copy (see "Tag a repo"
-  above) — a tagged repo's session mints its bearer from the device's own
-  state-dir credential store instead, so a hostile cloned repo cannot walk off
-  with it merely by existing on disk.
+  short-lived access tokens — there is no legacy session token. It is never
+  written to a per-repo `settings.local.json` (see "Tag a repo" above): a tagged
+  repo's session mints its bearer from the device's own state-dir credential store.

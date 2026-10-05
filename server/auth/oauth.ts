@@ -154,6 +154,13 @@ export const RESERVED_EMIT_CLIENT_NAME = 'tokenscope-emit'
 export const MAX_OAUTH_CLIENTS = 1000
 
 /**
+ * Absolute ceiling on oauth_client rows: at or above it EVERY registration is
+ * refused, whatever the source. Separate from the per-source + global rule
+ * below, which never denies a fresh source.
+ */
+export const HARD_MAX_OAUTH_CLIENTS = 10 * MAX_OAUTH_CLIENTS
+
+/**
  * Client secrets are bounded, not eternal (S6 — a never-expiring secret was
  * part of the original registration root cause). A year is generous for the
  * MVP's low-dozens client scale (mirrors MAX_OAUTH_CLIENTS' "generous
@@ -171,7 +178,8 @@ export const MAX_CLIENT_SECRET_AGE_MS = 365 * 24 * 60 * 60 * 1000
  *
  * The fix reserves headroom: the global ceiling only ever denies a caller
  * whose OWN recent registration volume is non-trivial. A low-volume new
- * registrant is never blocked by someone else's flood. This in-memory sliding
+ * registrant is never blocked by someone else's flood (below the separate
+ * HARD_MAX_OAUTH_CLIENTS, which refuses everyone). This in-memory sliding
  * window (no Redis in MVP, consistent with the global cap's "no Redis; a
  * COUNT(*) is cheap" posture) is per-process — it blunts a single-replica
  * flood rather than providing airtight cross-replica limiting, and the
@@ -256,33 +264,42 @@ export async function registerClient(
 
   const now = Date.now()
   const source = input.source ?? 'unknown'
-  const sourceCount = recentSourceRegistrationCount(source, now)
 
-  // Registration ceiling (coarse DoS backstop on the unauthenticated endpoint).
-  // Deny ONLY when the global ceiling is saturated AND this source's own
-  // recent volume is non-trivial — see the Ceiling doc comment above.
-  const countRows = await db.execute<{ count: string }>(
-    sql`SELECT COUNT(*)::text AS count FROM oauth_client`,
-  )
-  const globalCount = Number([...countRows][0]?.count ?? 0)
-  if (globalCount >= MAX_OAUTH_CLIENTS && sourceCount >= SOURCE_REGISTRATION_LIMIT) {
-    throw new OAuthError('temporarily_unavailable', 'Client registration limit reached')
-  }
-
+  // Registration ceilings (coarse DoS backstop on the unauthenticated endpoint).
+  // At HARD_MAX_OAUTH_CLIENTS deny everyone; otherwise deny ONLY when the global
+  // ceiling is saturated AND this source's own recent volume is non-trivial —
+  // see the Ceiling doc comment above.
+  // The ceiling checks, the insert and the per-source record hold one
+  // transaction-scoped advisory lock, so concurrent registrations cannot all
+  // read a count below a ceiling and then all insert.
   const clientSecret = randomBytes(32).toString('hex')
-  const [row] = await db
-    .insert(oauthClient)
-    .values({
-      clientSecretHash: hashSessionToken(clientSecret),
-      clientName,
-      redirectUris: input.redirectUris,
-      internal: false,
-    })
-    .returning({ clientId: oauthClient.clientId, createdAt: oauthClient.createdAt })
+  const row = await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('oauth_client_registration'))`)
+    const countRows = await tx.execute<{ count: string }>(
+      sql`SELECT COUNT(*)::text AS count FROM oauth_client`,
+    )
+    const globalCount = Number([...countRows][0]?.count ?? 0)
+    const sourceCount = recentSourceRegistrationCount(source, now)
+    if (globalCount >= HARD_MAX_OAUTH_CLIENTS) {
+      throw new OAuthError('temporarily_unavailable', 'Client registration limit reached')
+    }
+    if (globalCount >= MAX_OAUTH_CLIENTS && sourceCount >= SOURCE_REGISTRATION_LIMIT) {
+      throw new OAuthError('temporarily_unavailable', 'Client registration limit reached')
+    }
+    const [inserted] = await tx
+      .insert(oauthClient)
+      .values({
+        clientSecretHash: hashSessionToken(clientSecret),
+        clientName,
+        redirectUris: input.redirectUris,
+        internal: false,
+      })
+      .returning({ clientId: oauthClient.clientId, createdAt: oauthClient.createdAt })
+    if (inserted) recordSourceRegistration(source, now)
+    return inserted
+  })
 
   if (!row) throw new OAuthError('server_error', 'Client registration failed')
-
-  recordSourceRegistration(source, now)
 
   const clientSecretExpiresAt = Math.floor(
     (new Date(row.createdAt).getTime() + MAX_CLIENT_SECRET_AGE_MS) / 1000,

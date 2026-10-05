@@ -657,13 +657,13 @@ describe('provider_org cross-region clamp — create/patch (idor:0004 / T3-xregi
   it('region-A admin patching a provider_org to regionId=B → 403', async () => {
     const created = (await orgsPost(ev({
       method: 'POST', session: adminA(),
-      body: { provider: 'github', externalOrgId: 'xr-patch-target', displayName: 'X', reconciliationMode: 'indicative' },
+      body: { provider: 'github', externalOrgId: 'xr-patch-target', displayName: 'X', reconciliationMode: 'indicative', regionId },
     }))) as { id: string }
     await expect(
       orgPatch(ev({ method: 'PATCH', session: adminA(), params: { id: created.id }, body: { regionId: regionBId } })),
     ).rejects.toMatchObject({ statusCode: 403 })
     const rows = await t.client<{ region_id: string | null }[]>`SELECT region_id::text AS region_id FROM provider_org WHERE id = ${created.id}::uuid`
-    expect(rows[0]!.region_id).toBeNull() // patch rolled back — still unmapped
+    expect(rows[0]!.region_id).toBe(regionId) // patch rolled back — still in region A
   })
 
   it('region-A admin patching a region-B org WITHOUT regionId in the body → 403 (the source-side clamp)', async () => {
@@ -716,14 +716,25 @@ describe('provider_org cross-region clamp — create/patch (idor:0004 / T3-xregi
     expect(after[0]!.cost_owning_unit_id).toBe(couBId)
   })
 
-  it('an UNMAPPED org stays patchable by any region admin (onboarding surface preserved)', async () => {
+  it('an UNMAPPED org is estate-wide: a region admin PATCH is 403 (S13), platform-admin 200', async () => {
     const unmapped = (await orgsPost(ev({
-      method: 'POST', session: adminA(),
+      method: 'POST', session: finops(),
       body: { provider: 'github', externalOrgId: 'xr-src-clamp-unmapped', displayName: 'Unmapped', reconciliationMode: 'indicative' },
     }))) as { id: string }
-    await orgPatch(ev({ method: 'PATCH', session: adminB(), params: { id: unmapped.id }, body: { displayName: 'claimed by B' } }))
-    const rows = await t.client<{ display_name: string }[]>`SELECT display_name FROM provider_org WHERE id = ${unmapped.id}::uuid`
-    expect(rows[0]!.display_name).toBe('claimed by B')
+    await expect(
+      orgPatch(ev({ method: 'PATCH', session: adminB(), params: { id: unmapped.id }, body: { displayName: 'claimed by B' } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    // Claiming it into the caller's own region is the same write.
+    await expect(
+      orgPatch(ev({ method: 'PATCH', session: adminB(), params: { id: unmapped.id }, body: { regionId: regionBId } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const rows = await t.client<{ display_name: string; region_id: string | null }[]>`
+      SELECT display_name, region_id::text AS region_id FROM provider_org WHERE id = ${unmapped.id}::uuid`
+    expect(rows[0]).toEqual({ display_name: 'Unmapped', region_id: null })
+    const res = (await orgPatch(ev({
+      method: 'PATCH', session: finops(), params: { id: unmapped.id }, body: { displayName: 'renamed by platform' },
+    }))) as { updated: boolean }
+    expect(res.updated).toBe(true)
   })
 
   it('region-A admin patching costOwningUnitId to a region-B unit (regionId=A) → rejected', async () => {
@@ -745,6 +756,105 @@ describe('provider_org cross-region clamp — create/patch (idor:0004 / T3-xregi
       method: 'PATCH', session: finops(), params: { id: res.id }, body: { regionId, costOwningUnitId: couAId },
     }))) as { updated: boolean }
     expect(patched.updated).toBe(true)
+  })
+})
+
+describe('S13 — estate-wide provider config is platform-admin only', () => {
+  beforeAll(clearProviders)
+
+  it('provider_enterprise POST / PATCH / DELETE: region admin 403 and nothing written; platform-admin 200', async () => {
+    await expect(
+      entPost(ev({ method: 'POST', session: adminA(), body: { provider: 'github', externalId: 's13-ent-a', displayName: 'A', reconciliationMode: 'indicative' } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const none = await t.client<{ n: string }[]>`SELECT COUNT(*)::text AS n FROM provider_enterprise WHERE external_id = 's13-ent-a'`
+    expect(Number(none[0]!.n)).toBe(0)
+
+    const ent = (await entPost(ev({
+      method: 'POST', session: finops(), body: { provider: 'github', externalId: 's13-ent', displayName: 'S13', reconciliationMode: 'indicative' },
+    }))) as { id: string }
+    await expect(
+      entPatch(ev({ method: 'PATCH', session: adminA(), params: { id: ent.id }, body: { displayName: 'by region A' } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    await expect(
+      entPatch(ev({ method: 'PATCH', session: adminA(), params: { id: ent.id }, body: { credentialSecretName: 'other-key' } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    await expect(
+      entDelete(ev({ method: 'DELETE', session: adminA(), params: { id: ent.id } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const after = await t.client<{ display_name: string; credential_secret_name: string | null }[]>`
+      SELECT display_name, credential_secret_name FROM provider_enterprise WHERE id = ${ent.id}::uuid`
+    expect(after[0]).toEqual({ display_name: 'S13', credential_secret_name: null })
+
+    await entPatch(ev({ method: 'PATCH', session: finops(), params: { id: ent.id }, body: { displayName: 'S13 renamed' } }))
+    const renamed = await t.client<{ display_name: string }[]>`SELECT display_name FROM provider_enterprise WHERE id = ${ent.id}::uuid`
+    expect(renamed[0]!.display_name).toBe('S13 renamed')
+    await entDelete(ev({ method: 'DELETE', session: finops(), params: { id: ent.id } }))
+    const gone = await t.client<{ n: string }[]>`SELECT COUNT(*)::text AS n FROM provider_enterprise WHERE id = ${ent.id}::uuid`
+    expect(Number(gone[0]!.n)).toBe(0)
+  })
+
+  it('provider_org POST: a region admin may not create an UNMAPPED org or assign a credential (403); platform-admin may', async () => {
+    await expect(
+      orgsPost(ev({
+        method: 'POST', session: adminA(),
+        body: { provider: 'github', externalOrgId: 's13-unmapped', displayName: 'U', reconciliationMode: 'indicative' },
+      })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    await expect(
+      orgsPost(ev({
+        method: 'POST', session: adminA(),
+        body: {
+          provider: 'anthropic', externalOrgId: 's13-cred', displayName: 'C', reconciliationMode: 'reconciled',
+          apiKind: 'claude-code-admin', credentialSecretName: 'insight', regionId,
+        },
+      })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const none = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM provider_org WHERE external_org_id IN ('s13-unmapped', 's13-cred')`
+    expect(Number(none[0]!.n)).toBe(0)
+
+    const u = (await orgsPost(ev({
+      method: 'POST', session: finops(),
+      body: { provider: 'github', externalOrgId: 's13-unmapped', displayName: 'U', reconciliationMode: 'indicative' },
+    }))) as { id: string }
+    expect(u.id).toBeTruthy()
+    const c = (await orgsPost(ev({
+      method: 'POST', session: finops(),
+      body: {
+        provider: 'anthropic', externalOrgId: 's13-cred', displayName: 'C', reconciliationMode: 'reconciled',
+        apiKind: 'claude-code-admin', credentialSecretName: 'insight',
+      },
+    }))) as { id: string }
+    expect(c.id).toBeTruthy()
+  })
+
+  it('provider_org PATCH on an own-region org: changing the credential or unmapping it is 403 for a region admin; an unchanged round-trip is 200', async () => {
+    const org = (await orgsPost(ev({
+      method: 'POST', session: finops(),
+      body: {
+        provider: 'anthropic', externalOrgId: 's13-own', displayName: 'Own', reconciliationMode: 'reconciled',
+        apiKind: 'claude-code-admin', credentialSecretName: 'own-key', regionId,
+      },
+    }))) as { id: string }
+    await expect(
+      orgPatch(ev({ method: 'PATCH', session: adminA(), params: { id: org.id }, body: { credentialSecretName: 'insight' } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    await expect(
+      orgPatch(ev({ method: 'PATCH', session: adminA(), params: { id: org.id }, body: { regionId: null } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const rows = await t.client<{ credential_secret_name: string; region_id: string | null }[]>`
+      SELECT credential_secret_name, region_id::text AS region_id FROM provider_org WHERE id = ${org.id}::uuid`
+    expect(rows[0]).toEqual({ credential_secret_name: 'own-key', region_id: regionId })
+
+    // The admin dialog always round-trips the current credential; that is not an assignment.
+    const ok = (await orgPatch(ev({
+      method: 'PATCH', session: adminA(), params: { id: org.id }, body: { displayName: 'Own renamed', credentialSecretName: 'own-key' },
+    }))) as { updated: boolean }
+    expect(ok.updated).toBe(true)
+    const viaPlatform = (await orgPatch(ev({
+      method: 'PATCH', session: finops(), params: { id: org.id }, body: { credentialSecretName: 'insight' },
+    }))) as { updated: boolean }
+    expect(viaPlatform.updated).toBe(true)
   })
 })
 
@@ -784,8 +894,13 @@ describe('provider_org DELETE cross-region clamp + rollback', () => {
     expect(res.deleted).toBe(true)
   })
 
-  it('region-A admin deletes an unmapped (region_id IS NULL) org → 200 (onboarding surface)', async () => {
-    const res = (await orgDelete(ev({ method: 'DELETE', session: adminA(), params: { id: orgUnmappedId } }))) as { deleted: boolean }
+  it('an unmapped (region_id IS NULL) org: region admin DELETE is 403 and rolls back (S13); platform-admin 200', async () => {
+    await expect(
+      orgDelete(ev({ method: 'DELETE', session: adminA(), params: { id: orgUnmappedId } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const rows = await t.client<{ n: string }[]>`SELECT COUNT(*)::text AS n FROM provider_org WHERE id = ${orgUnmappedId}::uuid`
+    expect(Number(rows[0]!.n)).toBe(1)
+    const res = (await orgDelete(ev({ method: 'DELETE', session: finops(), params: { id: orgUnmappedId } }))) as { deleted: boolean }
     expect(res.deleted).toBe(true)
   })
 

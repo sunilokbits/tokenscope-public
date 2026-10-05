@@ -102,3 +102,25 @@ export const PERSONAL_LENS_COPY: Readonly<Record<SpendLens, SpendLensCopy>> = {
       'What your usage cross-charges to your Business Unit. Anthropic bills per person, so this is your Anthropic chargeable spend. Copilot is billed pooled per Business Unit and has no per-person charge.',
   },
 } as const
+
+/**
+ * Project-page lens copy (`/projects/[code]`), both depths.
+ *
+ * `chargeback` is the Anthropic bill split across projects by tagged share
+ * (`docs/design/project-chargeback-lens.md`); untagged bill cost is on no
+ * project, and Copilot (billed per Business Unit) is on none.
+ */
+export const PROJECT_LENS_COPY: Readonly<Record<SpendLens, SpendLensCopy>> = {
+  usage: {
+    label: PERSONAL_LENS_COPY.usage.label,
+    qualifier: PERSONAL_LENS_COPY.usage.qualifier,
+    basis: 'attributed usage · this project',
+    caption: "What this project used: its members' attributed usage, valued at our rate card.",
+  },
+  chargeback: {
+    label: PERSONAL_LENS_COPY.chargeback.label,
+    qualifier: PERSONAL_LENS_COPY.chargeback.qualifier,
+    basis: 'bill chargeback · this project',
+    caption: 'Bill dollars split by what was tagged; untagged spend is on no project.',
+  },
+} as const

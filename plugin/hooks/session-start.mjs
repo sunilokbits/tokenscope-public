@@ -552,6 +552,17 @@ export function staleInstancePinWarning(repoTagResult) {
   ].join(' ')
 }
 
+/** PURE: the warning shown when the repo tag refused a git-tracked target. */
+export function trackedRepoTagWarning(repoTagResult) {
+  if (!repoTagResult || repoTagResult.trackedRefused !== true) return null
+  return [
+    "TokenScope: this repo's .claude/settings.local.json is tracked by git, so the",
+    'project tag was NOT written to it (it would be published on your next commit).',
+    "To tag this repo's spend, untrack it (`git rm --cached .claude/settings.local.json`);",
+    'the next session start writes the tag, and sessions launched after that carry it.',
+  ].join(' ')
+}
+
 /** HTTP status from a sentinel, or null. */
 function sentinelHttp(sentinel) {
   return sentinel && Number.isFinite(sentinel.http_status) ? sentinel.http_status : null
@@ -822,6 +833,12 @@ async function main() {
   // claims, so this must not sit below a green-looking emission check.
   try {
     const w = staleInstancePinWarning(repoTagResult)
+    if (w) lines.push(w)
+  } catch {
+    /* fail-open: never warn on our own error */
+  }
+  try {
+    const w = trackedRepoTagWarning(repoTagResult)
     if (w) lines.push(w)
   } catch {
     /* fail-open: never warn on our own error */

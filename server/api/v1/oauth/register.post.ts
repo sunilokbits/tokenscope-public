@@ -19,7 +19,7 @@
  * Deferring its FORCE phase would not have helped: ENABLE alone filters a
  * non-owner, and this insert would have failed the moment the role changed.
  */
-import { defineEventHandler, readValidatedBody, getRequestIP, setResponseHeaders, setResponseStatus } from 'h3'
+import { defineEventHandler, readValidatedBody, getHeader, getRequestIP, setResponseHeaders, setResponseStatus } from 'h3'
 import { consola } from 'consola'
 import { registerClient, OAuthError } from '../../../auth/oauth'
 import { recordAuditEvent } from '../../../db/audit'
@@ -38,11 +38,19 @@ export default defineEventHandler(async (event) => {
   }
 
   const db = getDb()
-  // Source key for the per-source registration ceiling (S6 Ceiling fix) — same
-  // best-effort IP capture as setup/enroll.post.ts; never crashes registration.
+  // Source key for the per-source registration ceiling (S6 Ceiling fix); never
+  // crashes registration. With AZURE_FRONT_DOOR_ID set, key on X-Azure-SocketIP
+  // (the TCP peer Front Door saw; X-Azure-ClientIP follows a caller's
+  // X-Forwarded-For); otherwise the same best-effort capture as
+  // setup/enroll.post.ts. Both are caller-controlled on a publicly reachable
+  // origin, because require-front-door trusts X-Azure-FDID, which is not a
+  // secret. HARD_MAX_OAUTH_CLIENTS is the bound that holds regardless.
   let ip: string | null
   try {
-    ip = getRequestIP(event, { xForwardedFor: true }) ?? null
+    const frontDoorSocketIp = process.env.AZURE_FRONT_DOOR_ID
+      ? getHeader(event, 'x-azure-socketip')?.trim()
+      : undefined
+    ip = frontDoorSocketIp || getRequestIP(event, { xForwardedFor: true }) || null
   } catch {
     ip = null
   }

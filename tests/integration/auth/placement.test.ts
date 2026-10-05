@@ -163,12 +163,12 @@ describe('enroll-provision defaultPlacement (emit-on-install, no authenticated i
     expect(home.code).not.toBe('aaa-trap') // never "first org_unit ORDER BY path"
   })
 
-  it('a re-enroll from the SAME (email, device) is idempotent and reuses the same instance/teammate', async () => {
+  it('a re-enroll from the SAME (email, device) mints a fresh instance/teammate on the same holding node', async () => {
     const first = await locateOrCreateProvisionalInstance(t.db as never, 'enroll2@example.com', 'device-hint-2')
     const second = await locateOrCreateProvisionalInstance(t.db as never, 'enroll2@example.com', 'device-hint-2')
     if ('capExceeded' in first || 'capExceeded' in second) throw new Error('unexpected cap')
-    expect(second.reused).toBe(true)
-    expect(second.teammateId).toBe(first.teammateId)
-    expect(second.instanceId).toBe(first.instanceId)
+    expect(second.teammateId).not.toBe(first.teammateId)
+    expect(second.instanceId).not.toBe(first.instanceId)
+    expect((await homeOf(second.teammateId)).code).toBe('__UNPLACED__')
   })
 })

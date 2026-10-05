@@ -15,6 +15,10 @@
  * (`completeProjectSpendByMember`, same window vocabulary, same provisional
  * option), so the file can never disagree with the screen it was exported
  * from. `csvEscape()` mitigates formula injection (security-audit sweep).
+ *
+ * `?lane=chargeback` exports the page's chargeback contributors instead, in
+ * bill dollars (`v_finance_project_overlay`), under the same gate. The lane
+ * is echoed in the `x-spend-lane` header.
  */
 import { createError, defineEventHandler, getRouterParam, getValidatedQuery, setHeader } from 'h3'
 import { z } from 'zod'
@@ -28,6 +32,9 @@ import {
 import { resolveReportWindow } from '../../../../../../reporting/params'
 import { csvEscape } from '../../../../../../utils/csv-escape'
 import { MONTH_REGEX } from '../../../../../../utils/period'
+import { requestClock } from '../../../../../../utils/request-clock'
+import { parseSpendLens } from '../../../../../../../shared/usage/lens'
+import { fetchProjectChargebackContributors } from '../../../../../../reporting/project-chargeback'
 
 const ExportWindowQuery = z.object({
   month: z.string().regex(MONTH_REGEX).optional(),
@@ -39,6 +46,7 @@ const ExportWindowQuery = z.object({
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .optional(),
+  lane: z.unknown().optional(),
 })
 
 const NOT_FOUND = {
@@ -63,7 +71,8 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'Invalid project code' })
   }
   const query = await getValidatedQuery(event, (d) => ExportWindowQuery.parse(d))
-  const win = resolveReportWindow(query)
+  const lane = parseSpendLens(query.lane)
+  const win = resolveReportWindow(query, { now: new Date(requestClock(event).now) })
   const window: SpendWindow = { startIso: win.startIso, endIso: win.endIso }
 
   return await withRequestRls(event, async (tx) => {
@@ -73,6 +82,34 @@ export default defineEventHandler(async (event) => {
     // observer path gets the member-indistinguishable 404, not an empty file.
     if (!project || project.access !== 'member') {
       throw createError(NOT_FOUND)
+    }
+
+    const windowStamp = win.monthStr ?? `${win.from}_${win.to}`
+    setHeader(event, 'content-type', 'text/csv; charset=utf-8')
+    setHeader(event, 'x-spend-lane', lane)
+
+    // Chargeback lens: the same named rows the page shows, in bill dollars.
+    if (lane === 'chargeback') {
+      const rows = await fetchProjectChargebackContributors(tx, project.id, window)
+      const cbTotal = rows.reduce((a, r) => a + Number(r.usd), 0)
+      setHeader(
+        event,
+        'content-disposition',
+        `attachment; filename="tokenscope-project-${project.code}-team-chargeback-${windowStamp}.csv"`,
+      )
+      return (
+        [
+          'member,email,charge_usd,share_pct',
+          ...rows.map((r) =>
+            [
+              csvEscape(r.label),
+              csvEscape(r.email),
+              Number(r.usd).toFixed(2),
+              cbTotal > 0 ? ((Number(r.usd) / cbTotal) * 100).toFixed(1) : '0.0',
+            ].join(','),
+          ),
+        ].join('\n') + '\n'
+      )
     }
 
     const members = await completeProjectSpendByMember(tx, project.id, window, {
@@ -96,8 +133,6 @@ export default defineEventHandler(async (event) => {
       ),
     ]
 
-    const windowStamp = win.monthStr ?? `${win.from}_${win.to}`
-    setHeader(event, 'content-type', 'text/csv; charset=utf-8')
     setHeader(
       event,
       'content-disposition',

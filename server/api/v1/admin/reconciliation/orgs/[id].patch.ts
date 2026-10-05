@@ -13,13 +13,15 @@
  * reject. Nullable fields use an explicit-null convention: omit a key to leave it
  * unchanged, pass null to clear it.
  *
- * RBAC: requireRole(admin) + assertSameOrigin. Audited.
+ * RBAC: requireRole(admin) + assertSameOrigin. Audited. An unmapped org
+ * (region_id IS NULL) or a changed credentialSecretName is platform-admin only.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../../../utils/validated-body'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireRole, requireRegionScope, requireRegionScopeOrNotFound } from '../../../../../auth/rbac'
+import { isPlatformAdmin } from '../../../../../../shared/auth/roles'
 import { assertSameOrigin } from '../../../../../auth/csrf'
 import { withRequestRls } from '../../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../../db/audit'
@@ -64,6 +66,19 @@ const Body = z
     notes: z.string().max(2000).nullish(),
   })
   .refine((d) => Object.keys(d).length > 0, 'at least one field must be supplied')
+
+function platformAdminOnly(detail: string): never {
+  throw createError({
+    statusCode: 403,
+    statusMessage: 'Forbidden',
+    data: {
+      type: 'https://tokenscope.example.com/errors/forbidden',
+      title: 'Forbidden',
+      status: 403,
+      detail,
+    },
+  })
+}
 
 function badRequest(detail: string): never {
   throw createError({
@@ -159,10 +174,8 @@ export default defineEventHandler(async (event) => {
     // from the body. Runs AFTER the 404 above so the endpoint never becomes an
     // existence oracle for another region's org ids, and inside the transaction
     // so a denial rolls back — same shape as orgs/[id].delete.ts.
-    //
-    // An UNMAPPED org (region_id IS NULL) stays patchable by any region admin:
-    // that is the onboarding surface, deliberately preserved.
     if (cur.region_id) await requireRegionScopeOrNotFound(event, cur.region_id, notFound())
+    else if (!isPlatformAdmin(caller.role)) platformAdminOnly('An unmapped provider org (no region) is estate-wide; only platform-admin may write it.')
 
     // Merge supplied fields onto current to validate the resulting row.
     const nextMode: ReconciliationMode = has('reconciliationMode')
@@ -175,6 +188,12 @@ export default defineEventHandler(async (event) => {
       ? (body.credentialSecretName ?? null)
       : cur.credential_secret_name
     const nextRegionId: string | null = has('regionId') ? (body.regionId ?? null) : cur.region_id
+    if (nextRegionId === null && !isPlatformAdmin(caller.role)) {
+      platformAdminOnly('An unmapped provider org (no region) is estate-wide; only platform-admin may write it.')
+    }
+    if (nextCred !== cur.credential_secret_name && !isPlatformAdmin(caller.role)) {
+      platformAdminOnly('The credential namespace is deployment-wide; only platform-admin may assign credentialSecretName.')
+    }
 
     const apiKindErr = validateApiKindForProvider(provider, nextApiKind)
     if (apiKindErr) badRequest(apiKindErr)

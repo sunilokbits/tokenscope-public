@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout main repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Checkout wiki repo
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -34,6 +36,16 @@ jobs:
 
           # 1. Copy root-level files (Home.md, _Sidebar.md, _Footer.md, etc.)
           cp docs/wiki/*.md wiki/
+
+          # Directory names are spliced into sed programs below; only this charset is safe there.
+          for dir in docs/wiki/*/; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            if ! [[ "$name" =~ ^[A-Za-z0-9_-]+$ ]]; then
+              echo "::error::docs/wiki subdirectory name must match ^[A-Za-z0-9_-]+\$"
+              exit 1
+            fi
+          done
 
           # 2. For each subdirectory with .md files, copy each file to wiki/<subdir>-<file>.md
           #    AND rewrite same-dir bare references in that file at copy time.

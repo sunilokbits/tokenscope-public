@@ -17,11 +17,9 @@
  * A module test cannot see this: the boundary only exists once a handler has
  * resolved a project and handed it to the gate. These call the real handlers.
  *
- * Deliberately NOT covered: the twins' third conjunct,
- * placedBelowRegionRootPredicate() — a caller whose OWN home is the region root.
- * It is a SQL EXISTS, assertProjectScope has no tx, and a region-root manager
- * passing this gate is a currently tested contract
- * (tests/integration/admin/project-assign-directory.test.ts case (d)). Owner call.
+ * Also the twins' third conjunct, placedBelowRegionRootPredicate() (sea:auth:0004):
+ * a manager whose OWN home is the region root has the whole region as a subtree
+ * and is refused on every project in it.
  */
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest'
 import { startTestDb, stopTestDb, type TestDb } from '../helpers/db'
@@ -98,6 +96,8 @@ const mgrA = (): Session =>
     orgPath: ENG_PATH,
   }) as Session
 const adminA = (): Session => ({ ...mgrA(), email: 'admin.a@x.test', role: 'admin' }) as Session
+/** Manager homed at region A's ROOT ('shared'): the prefix test covers every unit in A. */
+const rootMgrA = (): Session => ({ ...mgrA(), email: 'root.mgr.a@x.test', orgPath: 'shared' }) as Session
 const orgWide = (): Session =>
   ({ ...mgrA(), email: 'gfin@x.test', role: 'platform-admin' }) as Session
 
@@ -291,6 +291,29 @@ describe('MONEY route — POST /allocations/:id/split', () => {
       SELECT count(*)::text AS n FROM allocation
       WHERE scope_type = 'project' AND scope_id = ${projAId}::uuid AND teammate_id = ${memberAId}::uuid`
     expect(row!.n).toBe('1')
+  })
+})
+
+describe('region-root guard (sea:auth:0004)', () => {
+  it('a manager homed at their region ROOT is refused their own region project: roster 403, budget 403, nothing written', async () => {
+    await expect(
+      assignmentsGet(ev({ session: rootMgrA(), method: 'GET', params: { id: projAId } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    await expect(
+      allocationsPost(
+        ev({
+          session: rootMgrA(),
+          method: 'POST',
+          params: {},
+          body: { project_id: projAId, budget_usd: '4200.00', effective: FRESH_RANGE },
+        }),
+      ),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const [row] = await t.client<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM allocation
+      WHERE scope_type = 'project' AND scope_id = ${projAId}::uuid
+        AND effective = ${FRESH_RANGE}::tstzrange`
+    expect(row!.n).toBe('0')
   })
 })
 

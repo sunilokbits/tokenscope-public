@@ -39,8 +39,9 @@
  * human sign-in (slice 5) — it is never an auth factor — so git identity is a
  * sound, low-risk source for it.
  *
- * DEVICE BINDING (a server-side dedup hint only — NOT an auth factor; the server
- * HMAC-hashes it at rest): a stable per-host id = `<hostname>:<machine-id>`, where
+ * DEVICE BINDING (a display hint only — NOT an auth factor and NOT a dedup key;
+ * the server HMAC-hashes it at rest, and every enrol mints a fresh provisional
+ * device even for a binding seen before): a stable per-host id = `<hostname>:<machine-id>`, where
  * machine-id is /etc/machine-id when present, else just the hostname. Per-host
  * matches the instance model (all containers on a host share the home → one
  * instance).
@@ -313,9 +314,9 @@ export function readClaimedEmail({ cwd = process.cwd(), home = homedir() } = {})
 }
 
 /**
- * A stable per-host device-binding hint. The server treats this as an opaque dedup
- * key (HMAC-hashed at rest), never an auth factor, so a best-effort stable value is
- * sufficient. /etc/machine-id when present, else just the hostname.
+ * A stable per-host device-binding hint. The server stores it HMAC-hashed as a
+ * display hint only — never a dedup key or an auth factor — so a best-effort stable
+ * value is sufficient. /etc/machine-id when present, else just the hostname.
  */
 export function computeDeviceBinding() {
   let machineId = ''

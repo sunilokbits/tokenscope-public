@@ -755,16 +755,17 @@ fi
 # GET /bearer with AUTH_TOKEN; set HTTP_STATUS + BODY (no exit). We do NOT use
 # `curl -f` (which discards the body and status); instead ask curl to append the
 # numeric status on its own trailing line so we can branch on it and still
-# surface the server's message.
+# surface the server's message. The access token rides in via STDIN (-H @-) so
+# it never appears in argv / a `ps` listing.
 present_bearer() {
   HTTP_STATUS=000
   BODY=""
   _resp="$(
     # shellcheck disable=SC2086 -- word-splitting $VERSION_HEADER_ARGS is intended;
     # its tokens are charset-constrained by safe_version above.
-    curl -q -s --connect-timeout 5 --max-time 10 -w '\n%{http_code}' \
+    printf 'Authorization: Bearer %s\n' "$AUTH_TOKEN" | curl -q -s --connect-timeout 5 --max-time 10 -w '\n%{http_code}' \
       --proto "$(proto_for "$TOKENSCOPE_BEARER_ENDPOINT")" \
-      -H "Authorization: Bearer ${AUTH_TOKEN}" \
+      -H @- \
       $VERSION_HEADER_ARGS \
       --url "${TOKENSCOPE_BEARER_ENDPOINT}" 2>/dev/null
   )" || _resp=""

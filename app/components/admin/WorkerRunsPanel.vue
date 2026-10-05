@@ -37,7 +37,9 @@ const props = withDefaults(defineProps<{
   worker: string
   /** How much history to pull. 30 runs is ~7 h of a 15-minute job. */
   limit?: number
-}>(), { limit: 30 })
+  /** Run detail is platform-admin only (GET worker-runs/[id]). */
+  canOpenDetail?: boolean
+}>(), { limit: 30, canOpenDetail: true })
 
 const EM_DASH = '—'
 
@@ -138,8 +140,9 @@ async function openRun(id: string) {
       <li v-for="r in runs" :key="r.id" :data-testid="`worker-run-${r.id}`">
         <button
           type="button"
-          class="w-full flex items-center justify-between gap-3 py-1.5 text-left cursor-pointer"
+          class="w-full flex items-center justify-between gap-3 py-1.5 text-left cursor-pointer disabled:cursor-default"
           :aria-expanded="openRunId === r.id"
+          :disabled="!props.canOpenDetail"
           @click="openRun(r.id)"
         >
           <span class="flex items-center gap-2 min-w-0">

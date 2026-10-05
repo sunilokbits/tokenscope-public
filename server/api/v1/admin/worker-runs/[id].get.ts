@@ -1,7 +1,8 @@
 /*
  * GET /api/v1/admin/worker-runs/[id] — one worker run with its FULL result object
  * (the per-run drill-down: scopes considered/run/errored/skipped, disposition counts,
- * etc.) + error + derived warnings. RBAC: admin | platform-admin. Admin-global.
+ * etc.) + error + derived warnings. RBAC: platform-admin only — a stored result can
+ * carry other regions' rows (e.g. attribution-gap instances).
  */
 import { defineEventHandler, getRouterParam, createError } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -23,7 +24,7 @@ interface Row extends Record<string, unknown> {
 }
 
 export default defineEventHandler(async (event) => {
-  await requireRole(event, 'admin')
+  await requireRole(event, 'platform-admin')
   const parsed = z.string().uuid().safeParse(getRouterParam(event, 'id'))
   if (!parsed.success) {
     throw createError({ statusCode: 400, statusMessage: 'Invalid run id' })

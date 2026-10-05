@@ -35,7 +35,9 @@ import { resolveReportWindow, DATE_REGEX } from '../../../../reporting/params'
 import {
   resolveProjectReportsAdmission,
   fetchProjectContribution,
+  projectPeopleScopeExpr,
   projectRemainderLabel,
+  splitProjectContribution,
 } from '../../../../reporting/project-depth'
 import { resolveDrillScope } from '../../../../reporting/teammate'
 import {
@@ -46,6 +48,13 @@ import { fetchProjectAllocation } from '../../../../usage/consumption'
 import { providerStatesForWindow } from '../../../../reports/settling'
 import { reportCoverageMeta } from '../../../../reports/coverage-meta'
 import { MONTH_REGEX, monthKeyUtc } from '../../../../utils/period'
+import { requestClock } from '../../../../utils/request-clock'
+import { parseSpendLens } from '../../../../../shared/usage/lens'
+import type { ReportsProjectChargebackResponse } from '../../../../../shared/reports/project-chargeback'
+import {
+  fetchProjectChargebackContributors,
+  fetchProjectChargebackSeries,
+} from '../../../../reporting/project-chargeback'
 
 const Query = z.object({
   month: z.string().regex(MONTH_REGEX).optional(),
@@ -60,6 +69,7 @@ const Query = z.object({
    * resolved from the caller's own grants, never from this token.
    */
   src: z.string().max(120).optional(),
+  lane: z.unknown().optional(),
 })
 
 /** Manager-facing project figures drop unconfirmed identity bindings — the same
@@ -123,7 +133,8 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, statusMessage: 'Invalid project code' })
   }
   const query = await getValidatedQuery(event, (d) => Query.parse(d))
-  const now = new Date()
+  const lane = parseSpendLens(query.lane)
+  const now = new Date(requestClock(event).now)
   const win = resolveReportWindow(query, { now })
   const window = { startIso: win.startIso, endIso: win.endIso }
   const month = win.monthStr ?? monthKeyUtc(new Date(win.startIso))
@@ -170,9 +181,76 @@ export default defineEventHandler(async (event) => {
       // — or to nothing at all — when the caller's grants change, and the body
       // now carries per-row drill admission computed from it.
       `drill:${drill?.key ?? 'none'}`,
+      `lane:${lane}`,
     ],
     () =>
       withRequestRls(event, async (tx) => {
+        const spanDays = Math.round((Date.parse(win.endIso) - Date.parse(win.startIso)) / DAY_MS)
+        const elapsedDays = Math.max(
+          1,
+          Math.min(Math.ceil((now.getTime() - Date.parse(win.startIso)) / DAY_MS), spanDays),
+        )
+        const projectBlock = {
+          id: admission.project.id,
+          code: admission.project.code,
+          display_name: admission.project.displayName,
+        }
+        const windowBlock = {
+          from: win.from,
+          to: win.to,
+          is_month: win.isMonth,
+          month: win.monthStr ?? month,
+          days_elapsed: elapsedDays,
+          days_in_window: spanDays,
+        }
+
+        // Chargeback lens: bill dollars only, so none of the §A reads below run.
+        // Contributors are named by the same rule as the attributed lens.
+        if (lane === 'chargeback') {
+          const [cb, rows] = await Promise.all([
+            fetchProjectChargebackSeries(tx, admission.project.id, window),
+            fetchProjectChargebackContributors(
+              tx,
+              admission.project.id,
+              window,
+              projectPeopleScopeExpr(admission),
+            ),
+          ])
+          const contribution = await splitProjectContribution(tx, rows, win, {
+            grants,
+            teammateId: session.teammateId,
+            drill: drill ? { scope: drill.usage, token: drill.token } : null,
+          })
+          const body: ReportsProjectChargebackResponse = {
+            project: projectBlock,
+            admitted_by: grants.project,
+            scope: { src: query.src ?? null },
+            window: windowBlock,
+            lane,
+            chargeback: {
+              total_usd: cb.totalUsd.toFixed(2),
+              series: cb.series.map((d) => ({ date: d.date, cost_usd: d.usd.toFixed(2) })),
+              contributors: {
+                named: contribution.named.map((r) => ({
+                  teammate_id: r.teammateId,
+                  display_name: r.displayName,
+                  cost_usd: r.usd.toFixed(2),
+                  is_active: r.isActive,
+                  can_drill: r.canDrill,
+                })),
+                remainder: {
+                  members: contribution.remainder.members,
+                  label: projectRemainderLabel(contribution.remainder.members),
+                  cost_usd: contribution.remainder.usd.toFixed(2),
+                },
+                rows_total_usd: contribution.totalUsd.toFixed(2),
+              },
+              settling: providerStatesForWindow(win, now).find((s) => s.vendor === 'anthropic')!,
+            },
+          }
+          return body
+        }
+
         const [spend, allocation, modelMix, contribution, coverage] = await Promise.all([
           completeOneProjectSpend(tx, admission.project.id, window, PROJECT_SPEND_OPTS),
           fetchProjectAllocation(tx, admission.project.id),
@@ -188,29 +266,13 @@ export default defineEventHandler(async (event) => {
           reportCoverageMeta(tx),
         ])
 
-        const spanDays = Math.round((Date.parse(win.endIso) - Date.parse(win.startIso)) / DAY_MS)
-        const elapsedDays = Math.max(
-          1,
-          Math.min(Math.ceil((now.getTime() - Date.parse(win.startIso)) / DAY_MS), spanDays),
-        )
-
         return {
-          project: {
-            id: admission.project.id,
-            code: admission.project.code,
-            display_name: admission.project.displayName,
-          },
+          project: projectBlock,
           /** How this viewer got in — the page says so on its face (prototype `:736`). */
           admitted_by: grants.project,
           scope: { src: query.src ?? null },
-          window: {
-            from: win.from,
-            to: win.to,
-            is_month: win.isMonth,
-            month: win.monthStr ?? month,
-            days_elapsed: elapsedDays,
-            days_in_window: spanDays,
-          },
+          window: windowBlock,
+          lane,
           budget: {
             /*
              * OVER ALL MEMBERS. `contribution.totalUsd` is the same figure from

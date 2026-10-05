@@ -400,14 +400,14 @@ export function unhomedByMonthSql(startIso: string, endIso: string): SQL {
  *      never placed in any region at all);
  *   2. otherwise the home node is a HOLDING node (region known, unit not);
  *   3. otherwise no active cost-owning unit exists anywhere in the node's
- *      ancestry, at ANY depth.
+ *      same-region ancestry, at ANY depth.
  *
  * (3) IS THE REMAINDER of this arm, and the header says so rather than dressing
  * it up as an independent partition: this arm only admits rows the view already
  * resolved to a NULL `cost_owning_unit_id`, and the view resolves that with the
- * SAME rule (`anc.is_cost_owning_unit AND anc.retired_at IS NULL`, mig 0085's
- * LEFT JOIN LATERAL), so the NOT EXISTS cannot be false for a row that reaches
- * it. It is written out anyway as a MIRROR of that LATERAL — if the view's rule
+ * SAME rule (same-region `anc.is_cost_owning_unit AND anc.retired_at IS NULL`,
+ * v_org_unit_cost_owner, mig 0147), so the NOT EXISTS cannot be false for a row
+ * that reaches it. It is written out anyway as a MIRROR of that rule — if the view's rule
  * ever changes without this one, the CASE yields NULL, the row falls out of
  * every bucket, and the residual reports it instead of the split quietly
  * reclassifying money. `retired_at IS NULL` is the half of the mirror that IS
@@ -422,7 +422,7 @@ function teammateCauseSql(startIso: string, endIso: string): SQL {
              WHEN ou.unit_type = ${HOLDING_UNIT_TYPE} THEN 'region-no-unit'
              WHEN NOT EXISTS (
                SELECT 1 FROM org_unit anc
-               WHERE ou.path <@ anc.path
+               WHERE ou.path <@ anc.path AND anc.region_id = ou.region_id
                  AND anc.is_cost_owning_unit = TRUE AND anc.retired_at IS NULL
              ) THEN 'no-cost-owning-ancestor'
            END AS cause

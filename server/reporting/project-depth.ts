@@ -276,22 +276,9 @@ export async function fetchProjectContribution(
     drill: { scope: UsageScope; token: string } | null
   },
 ): Promise<ProjectContribution> {
-  const inScopeExpr =
-    admission.peopleScope == null
-      ? sql`TRUE`
-      : sql`EXISTS (
-          SELECT 1 FROM org_unit ou
-          WHERE ou.id = t.org_unit_id AND ${admission.peopleScope}
-        )`
+  const inScopeExpr = projectPeopleScopeExpr(admission)
 
-  const rows = await tx.execute<{
-    teammate_id: string
-    label: string
-    usd: string
-    drill_is_active: boolean | null
-    drill_is_provisional: boolean | null
-    in_scope: boolean
-  }>(sql`
+  const rows = await tx.execute<ProjectContributorRow>(sql`
     SELECT u.teammate_id::text AS teammate_id,
            COALESCE(NULLIF(t.display_name, ''), t.email) AS label,
            COALESCE(SUM(u.cost_usd), 0)::text AS usd,
@@ -311,7 +298,46 @@ export async function fetchProjectContribution(
      GROUP BY u.teammate_id, t.display_name, t.email
      ORDER BY SUM(u.cost_usd) DESC, COALESCE(NULLIF(t.display_name, ''), t.email) ASC`)
 
-  const all = [...rows]
+  return splitProjectContribution(tx, [...rows], win, viewer)
+}
+
+/** One contributor's window total, with the facts the naming and drill rules read. */
+export interface ProjectContributorRow extends Record<string, unknown> {
+  teammate_id: string
+  label: string
+  usd: string
+  drill_is_active: boolean | null
+  drill_is_provisional: boolean | null
+  in_scope: boolean
+}
+
+/**
+ * The SQL fragment that flags a contributor (alias `t` = teammate) as inside the
+ * viewer's people scope.
+ */
+export function projectPeopleScopeExpr(admission: ProjectReportsAdmission): SQL {
+  return admission.peopleScope == null
+    ? sql`TRUE`
+    : sql`EXISTS (
+        SELECT 1 FROM org_unit ou
+        WHERE ou.id = t.org_unit_id AND ${admission.peopleScope}
+      )`
+}
+
+/**
+ * Split per-contributor totals into named rows and ONE remainder by the shared
+ * naming rule. Every lens of the reports-depth project page names through here.
+ */
+export async function splitProjectContribution(
+  tx: Tx,
+  all: ProjectContributorRow[],
+  win: UsageWindow,
+  viewer: {
+    grants: ReportScopeGrants
+    teammateId: string
+    drill: { scope: UsageScope; token: string } | null
+  },
+): Promise<ProjectContribution> {
 
   /*
    * D34's emit-time conjunct, evaluated against the CARRIED frame — the

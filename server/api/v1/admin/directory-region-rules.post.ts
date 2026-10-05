@@ -13,34 +13,16 @@
  * (attribute, match_value) so re-adding re-points the target and refreshes casing
  * — a value cannot mean two different things at once.
  *
- * ── WHO MAY WRITE WHICH ───────────────────────────────────────────────────────
- * A REGION rule is cross-region placement config: it decides which region a
- * never-logged-in person lands in, so it stays GLOBAL-roles-only, exactly as it
- * was.
+ * ── WHO MAY WRITE ─────────────────────────────────────────────────────────────
+ * platform-admin only, for BOTH targets. A unit rule is step 0 of the placement
+ * resolver (server/reconciliation/region-derivation.ts), so it decides the REGION
+ * of everyone it matches as well as their unit; it cannot be clamped to one
+ * region's people. Region admins may still delete their own region's unit rules
+ * (directory-region-rules/[id].delete.ts).
  *
- * A UNIT rule places people into ONE region's cost centre, so a region admin may
- * write it — for their OWN region, which is `requireRegionScope` against the
- * TARGET UNIT's region. That is the same check `bulk-place` runs against the same
- * kind of target, deliberately: "may this caller place people into this unit" has
- * one answer, not one per endpoint.
- *
- * ── AND WHAT THEY MAY OVERWRITE ───────────────────────────────────────────────
- * The upsert is the part a scope check on the NEW target alone does not cover. If
- * (attribute, match_value) already has a rule, writing it re-points whatever is
- * there — so a region admin could otherwise hijack another region's rule, or
- * convert a global region rule into a rule that feeds their own cost centre,
- * simply by naming the same value. So the EXISTING row is locked and authorised
- * too: a region admin may only overwrite a unit rule they already administer, and
- * never a region rule.
- *
- * That authorisation is only worth anything if it cannot be skipped by ARRIVING
- * FIRST. `FOR UPDATE` locks a row that exists; when the key is still free it locks
- * nothing at all, so two regions can both read "no rule here", both skip the check
- * that has nothing to check, and the loser's ON CONFLICT DO UPDATE silently
- * re-points the winner's rule. The upsert KEY is therefore taken as a
- * transaction-scoped advisory lock (LOCK_NAMESPACE.directoryRule) before the read
- * — the no-row-yet case is exactly the one a row lock cannot cover, and it is the
- * one that bypasses the authorisation.
+ * The upsert KEY is taken as a transaction-scoped advisory lock
+ * (LOCK_NAMESPACE.directoryRule) before the read, so two writers of one key queue
+ * rather than both reading "no rule here".
  *
  * ── THE TARGET MUST BE ABLE TO RECEIVE SPEND ──────────────────────────────────
  * `assertCostOwningTarget` — the same function bulk-place uses, with the same
@@ -52,13 +34,12 @@ import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../utils/validated-body'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
-import { requireRole, requireRegionScope } from '../../../auth/rbac'
+import { requireRole } from '../../../auth/rbac'
 import { assertSameOrigin } from '../../../auth/csrf'
 import { withRequestRls } from '../../../db/request-rls'
 import { recordAuditEvent } from '../../../db/audit'
 import { advisoryXactLock } from '../../../db/advisory-lock'
 import { assertCostOwningTarget } from '../../../db/place-teammate'
-import { isPlatformAdmin } from '../../../../shared/auth/roles'
 import {
   isRegionAttributeKey,
   isMatchMode,
@@ -96,19 +77,9 @@ function refuse(status: number, detail: string): never {
 }
 
 export default defineEventHandler(async (event) => {
-  // Authenticate at the wider surface first, then narrow by what is being written:
-  // a REGION rule still demands a global role, checked below before anything reads
-  // the database.
-  const caller = await requireRole(event, 'admin')
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const body = await readValidated(event, Body)
-  const orgWide = isPlatformAdmin(caller.role)
-  if (!body.org_unit_id && !orgWide) {
-    refuse(
-      403,
-      'A region rule sets which REGION people land in, which is org-wide placement configuration — global finance access is required. To route people into one of your own cost centres, create a unit rule instead.',
-    )
-  }
   const matchValue = normalizeMatchValue(body.match_value)
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null
@@ -139,11 +110,7 @@ export default defineEventHandler(async (event) => {
         FROM org_unit WHERE id = ${body.org_unit_id}::uuid LIMIT 1 FOR SHARE
       `)
       const unit = [...unitRows][0]
-      // 422 rather than 404: the id came from a picker, and telling an
-      // unauthorised caller "no such unit" apart from "not your unit" is an
-      // existence oracle. Both land on the same refusal.
       if (!unit) refuse(422, 'org_unit_id must reference an org unit that exists.')
-      await requireRegionScope(event, unit.region_id)
       await assertCostOwningTarget(tx, body.org_unit_id)
       regionId = unit.region_id
       orgUnitId = body.org_unit_id
@@ -157,11 +124,7 @@ export default defineEventHandler(async (event) => {
     const regionRow = [...regionRows][0]
     if (!regionRow) refuse(422, 'Region not found')
 
-    /*
-     * The row this upsert would REPLACE. Locked, because the authorisation below
-     * is a statement about it and READ COMMITTED would otherwise let a concurrent
-     * write change the target between the check and the ON CONFLICT.
-     */
+    /* The row this upsert would REPLACE, read for the audit trail. */
     const existingRows = await tx.execute<{ id: string; region_id: string; org_unit_id: string | null }>(sql`
       SELECT id::text AS id, region_id::text AS region_id, org_unit_id::text AS org_unit_id
       FROM directory_region_rule
@@ -169,18 +132,6 @@ export default defineEventHandler(async (event) => {
       LIMIT 1 FOR UPDATE
     `)
     const existing = [...existingRows][0]
-    if (existing && !orgWide) {
-      if (!existing.org_unit_id) {
-        refuse(
-          403,
-          `“${body.match_value.trim()}” is already used by an org-wide region rule. Re-pointing it would change which region everyone matching it lands in, so it takes global finance access.`,
-        )
-      }
-      // A unit rule they must already administer — same scope check, applied to
-      // what is being overwritten rather than only to what replaces it.
-      await requireRegionScope(event, existing.region_id)
-    }
-
     const upserted = await tx.execute<{ id: string }>(sql`
       INSERT INTO directory_region_rule (attribute, match_mode, match_value, match_value_raw, region_id, org_unit_id, created_by, created_at)
       VALUES (${body.attribute}, ${body.match_mode}, ${matchValue}, ${body.match_value.trim()}, ${regionId}::uuid, ${orgUnitId}::uuid, ${caller.teammateId}::uuid, now())

@@ -5,7 +5,8 @@
  * docs/design/emit-on-install-provisional-attribution.md §Flows 1. Covers the
  * threat-model invariants: secret gate (the ONLY distinguishable outcome →
  * 401), provisional-only shadow teammate + server-chosen instance, emit-only
- * credential, idempotent reuse, constant-shape (known vs unknown email), and the
+ * credential, a re-enrol never touching an existing device, the bootstrap-secret
+ * strength floor, constant-shape (known vs unknown email), and the
  * provisional caps (429).
  *
  * Real DB via testcontainers (AGENTS.md: never mock Drizzle). The h3 handler is
@@ -196,6 +197,33 @@ describe('enroll — secret gate', () => {
     ).rejects.toMatchObject({ statusCode: 401 })
   })
 
+  it('refuses a bootstrap secret below the key-strength floor (fails closed with 401)', async () => {
+    const weak = [
+      'short-secret', // under the 32-char floor
+      'a'.repeat(48), // long enough, near-zero entropy
+      '__TOKENSCOPE_ENROLLMENT_SECRET__', // the plugin's inert placeholder
+    ]
+    try {
+      for (const secret of weak) {
+        process.env.NUXT_ENROLLMENT_SECRET = secret
+        await expect(
+          enroll(
+            validBody({
+              enrollment_secret: secret,
+              claimed_email: 'weak-secret@example.com',
+              device_binding: `dev-weak-${randomUUID()}`,
+            }),
+          ),
+        ).rejects.toMatchObject({ statusCode: 401 })
+      }
+    } finally {
+      process.env.NUXT_ENROLLMENT_SECRET = BOOTSTRAP_SECRET
+    }
+    const rows = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM instance_attestation WHERE claimed_email = 'weak-secret@example.com'`
+    expect(Number(rows[0]!.n)).toBe(0)
+  })
+
   it('rejects a revoked enrollment_secret row with 401', async () => {
     const revoked = 'revoked-secret-value-999'
     await t.client`
@@ -303,43 +331,33 @@ describe('enroll — tool discriminator', () => {
   })
 })
 
-// ── idempotency ────────────────────────────────────────────────────────────────
+// ── re-enrol never touches an existing device (TS-EDGE-01) ─────────────────────
 
-describe('enroll — idempotent re-enroll', () => {
-  it('a re-enroll from the same (claimed_email, device_binding) reuses the instance + teammate', async () => {
-    const body = validBody({ claimed_email: 'idem@example.com', device_binding: 'dev-idem' })
+async function credentialIsLive(refreshToken: string): Promise<boolean> {
+  const rows = await t.client<{ revoked_at: Date | null }[]>`
+    SELECT revoked_at FROM oauth_token WHERE refresh_token_hash = ${hashSessionToken(refreshToken)}`
+  expect(rows.length).toBe(1) // vacuity guard: a mis-hashed token must fail, not read as live
+  return rows[0]!.revoked_at === null
+}
+
+describe('enroll — a reuse match mints a fresh device', () => {
+  it('re-enrolling the same (claimed_email, device_binding, tool) leaves the original credential live and yields a different instance id', async () => {
+    const body = validBody({ claimed_email: 'victim@example.com', device_binding: 'dev-victim' })
     const first = await enroll(body)
     const second = await enroll(body)
-    expect(second.instance_id).toBe(first.instance_id)
 
-    const insts = await t.client<{ n: string }[]>`
-      SELECT COUNT(*)::text AS n FROM instance_attestation WHERE claimed_email = 'idem@example.com'`
-    expect(Number(insts[0]!.n)).toBe(1)
-    const tms = await t.client<{ n: string }[]>`
-      SELECT COUNT(*)::text AS n FROM teammate WHERE provisional AND email = 'idem@example.com'`
-    expect(Number(tms[0]!.n)).toBe(1)
+    expect(second.instance_id).not.toBe(first.instance_id)
+    expect(second.oauth_refresh_token).not.toBe(first.oauth_refresh_token)
+    expect(await credentialIsLive(first.oauth_refresh_token)).toBe(true)
+    expect(await credentialIsLive(second.oauth_refresh_token)).toBe(true)
 
-    // Rotation: still exactly one live emit credential for the device.
-    const live = await t.client<{ n: string }[]>`
-      SELECT COUNT(*)::text AS n FROM oauth_token
-       WHERE instance_id = ${first.instance_id}::uuid AND scope = 'tokenscope.emit' AND revoked_at IS NULL`
-    expect(Number(live[0]!.n)).toBe(1)
-  })
-
-  it('CONCURRENT enrolls for the same (email, device) dedup to ONE instance + teammate (FIX 4 TOCTOU)', async () => {
-    const body = validBody({ claimed_email: 'race@example.com', device_binding: 'dev-race' })
-    // Fire two enrolls at once. Without the advisory xact lock both SELECTs miss and
-    // each mints a duplicate shadow teammate + instance; with it the second blocks,
-    // then reuses the first's freshly-committed row.
-    const [a, b] = await Promise.all([enroll(body), enroll(body)])
-    expect(a.instance_id).toBe(b.instance_id)
-
-    const insts = await t.client<{ n: string }[]>`
-      SELECT COUNT(*)::text AS n FROM instance_attestation WHERE claimed_email = 'race@example.com'`
-    expect(Number(insts[0]!.n)).toBe(1)
-    const tms = await t.client<{ n: string }[]>`
-      SELECT COUNT(*)::text AS n FROM teammate WHERE provisional AND email = 'race@example.com'`
-    expect(Number(tms[0]!.n)).toBe(1)
+    // The original device keeps its own credential, and the second caller's
+    // credential is bound to the second instance only.
+    const bound = await t.client<{ instance_id: string }[]>`
+      SELECT instance_id::text AS instance_id FROM oauth_token
+       WHERE refresh_token_hash = ${hashSessionToken(second.oauth_refresh_token)}`
+    expect(bound[0]!.instance_id).toBe(second.instance_id)
+    expect(await emitScopesForInstance(first.instance_id)).toEqual(['tokenscope.emit'])
   })
 
   it('a different device for the same email mints a SEPARATE instance + provisional teammate', async () => {
@@ -380,7 +398,7 @@ describe('enroll — constant-shape (no existence oracle)', () => {
 // ── caps ────────────────────────────────────────────────────────────────────
 
 describe('enroll — provisional caps return 429', () => {
-  it('the per-claimed_email cap returns 429 once exceeded (reuse never consumes quota)', async () => {
+  it('the per-claimed_email cap returns 429 once exceeded, including for a re-enrol of the same device', async () => {
     process.env.MAX_PROVISIONAL_INSTANCES_PER_EMAIL = '1'
     try {
       await enroll(validBody({ claimed_email: 'capped@example.com', device_binding: 'cap-dev-1' }))
@@ -388,11 +406,10 @@ describe('enroll — provisional caps return 429', () => {
       await expect(
         enroll(validBody({ claimed_email: 'capped@example.com', device_binding: 'cap-dev-2' })),
       ).rejects.toMatchObject({ statusCode: 429 })
-      // But an idempotent re-enroll of the FIRST device still succeeds (no new row).
-      const again = await enroll(
-        validBody({ claimed_email: 'capped@example.com', device_binding: 'cap-dev-1' }),
-      )
-      expect(again.instance_id).toMatch(/^[0-9a-f-]{36}$/)
+      // A re-enrol of the FIRST device is a create too, so it trips the cap.
+      await expect(
+        enroll(validBody({ claimed_email: 'capped@example.com', device_binding: 'cap-dev-1' })),
+      ).rejects.toMatchObject({ statusCode: 429 })
     } finally {
       delete process.env.MAX_PROVISIONAL_INSTANCES_PER_EMAIL
     }

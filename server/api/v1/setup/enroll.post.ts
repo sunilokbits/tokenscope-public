@@ -24,8 +24,10 @@
  *   - CONSTANT-SHAPE: the response is byte-shape identical regardless of whether
  *     the claimed email already exists anywhere — only server-minted material is
  *     returned, never a canonicalised email or any teammate field.
- *   - IDEMPOTENT + CAPPED: a re-enroll from the same (claimed_email, device_binding)
- *     reuses the same rows; a global + per-email provisional cap returns 429.
+ *   - FRESH + CAPPED: every enroll mints a NEW provisional instance and
+ *     credential, even for a (claimed_email, device_binding) seen before; an
+ *     existing instance's id or credential is never returned, revoked or
+ *     rotated. A global + per-email provisional cap returns 429.
  *
  * The response carries one-time credential material → Cache-Control: no-store
  * (mirrors /setup/redeem + the OAuth token endpoint). Shape mirrors
@@ -120,7 +122,7 @@ export default defineEventHandler(async (event) => {
   }
   const ua = getHeader(event, 'user-agent') ?? null
 
-  // ONE transaction for locate/create → mint → audit, mirroring /setup/redeem: a
+  // ONE transaction for create → mint → audit, mirroring /setup/redeem: a
   // mid-sequence failure (incl. a throwing audit) rolls everything back. The emit
   // mint's per-instance advisory xact lock lives inside it.
   const result = await db.transaction(async (tx) => {
@@ -135,8 +137,8 @@ export default defineEventHandler(async (event) => {
     }
 
     // EMIT-ONLY. issueEmitCredential hard-literals scope 'tokenscope.emit'; the
-    // Tx wrapper binds it to this instance and rotates out any prior live emit
-    // credential for it (at most one live per device).
+    // Tx wrapper binds it to the instance created above, which has no prior
+    // credential to rotate.
     const emit = await issueInstanceEmitCredentialTx(
       tx as never,
       located.teammateId,
@@ -150,7 +152,7 @@ export default defineEventHandler(async (event) => {
       actorSystem: 'setup-enroll',
       subjectKind: 'instance',
       subjectId: located.instanceId,
-      payload: { reused: located.reused, identity_state: 'provisional', tool },
+      payload: { identity_state: 'provisional', tool },
       ipAddress: ip,
       userAgent: ua,
     })
@@ -169,9 +171,9 @@ export default defineEventHandler(async (event) => {
 
   // CONSTANT-SHAPE: every field is either server-minted THIS request or derived
   // ONLY from the request's own `tool` — identical regardless of whether
-  // claimed_email exists anywhere. No canonicalised email, no teammate field, no
-  // `reused` flag (that rides the audit row only). The bundle/telemetry key vary by
-  // the CLIENT's chosen tool, never by email existence, so this is no oracle. Shape
+  // claimed_email exists anywhere. No canonicalised email, no teammate field. The
+  // bundle/telemetry key vary by the CLIENT's chosen tool, never by email
+  // existence, so this is no oracle. Shape
   // mirrors /setup/redeem (telemetry.copilot for copilot-cli, telemetry.claude else)
   // so the matching client write helper is reused verbatim.
   const telemetry = tool === 'copilot-cli' ? { copilot: bundle } : { claude: bundle }

@@ -125,12 +125,11 @@ type Tx = PostgresJsDatabase<Record<string, unknown>>
  * The axes the billed lane can answer, which is exactly the set
  * `provider_usage_fact` carries a column for (mig 0118:54-79).
  *
- * `project` is DELIBERATELY ABSENT and its absence is a fact about the source,
- * not an omission here: the table has no project column, the provider API has
- * no concept of a project and never will (design §3), and splitting a billed
- * day across budgets by an OTel share is the apportionment §5 deleted. The
- * budget axis therefore stays on the attributed lane in BOTH lanes and says so
- * through `MeasureLanes` — see `engine/budget-axis.ts`.
+ * `project` is DELIBERATELY ABSENT: the table has no project column. The bill
+ * split by tagged share is `v_finance_project_overlay`, served on the project
+ * page (docs/design/project-chargeback-lens.md). The budget axis stays on the
+ * attributed lane in BOTH lanes and says so through `MeasureLanes` — see
+ * `engine/budget-axis.ts`.
  */
 export const BILLED_AXES = ['region', 'practice', 'teammate', 'model', 'surface'] as const
 export type BilledAxis = (typeof BILLED_AXES)[number]

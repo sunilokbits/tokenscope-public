@@ -8,13 +8,22 @@
  *   - manager        → the project must be in the caller's OWN region AND its
  *                      cost-owning unit within the caller's org subtree
  *                      (region_id = session.regionId AND cou.path <@ orgPath)
+ *                      AND the caller's own home is not the region root
+ *                      (placedBelowRegionRootPredicate, read on `tx`)
  *   - platform-admin  → unbounded
  *
  * This is the live gate; RLS is inert at runtime (owner DB connection)
  * until Epic 10's non-owner role lands. See allocation-scope.ts.
+ *
+ * `tx` must be a withRequestRls transaction for this same event: the root guard
+ * reads the caller's region and org path from its GUCs.
  */
 import { createError, type H3Event } from 'h3'
+import { sql } from 'drizzle-orm'
+import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
+import type * as schema from '../../drizzle/schema'
 import { requireAuth, requireRegionScope } from './rbac'
+import { placedBelowRegionRootPredicate } from './org-subtree-scope'
 import { isPlatformAdmin } from '../../shared/auth/roles'
 
 export interface ProjectScope {
@@ -47,7 +56,11 @@ function sameRegion(a: string | null | undefined, b: string | null | undefined):
   return typeof a === 'string' && a !== '' && a === b
 }
 
-export async function assertProjectScope(event: H3Event, project: ProjectScope): Promise<void> {
+export async function assertProjectScope(
+  event: H3Event,
+  project: ProjectScope,
+  tx: PostgresJsDatabase<typeof schema>,
+): Promise<void> {
   const session = await requireAuth(event)
   if (session.role === 'admin') {
     // Region admin: bound to the project's region.
@@ -66,18 +79,10 @@ export async function assertProjectScope(event: H3Event, project: ProjectScope):
     // The refusal does not say WHICH conjunct failed, matching the twins: both
     // failures are one "no row" there, and neither should be an oracle here.
     //
-    // NOT at parity with the twins: they carry a THIRD conjunct,
-    // placedBelowRegionRootPredicate(), which refuses a caller whose own home IS
-    // the region root (their "subtree" is then the whole region). It is not
-    // replicated here — it is a SQL EXISTS and this helper takes only an H3Event,
-    // and a region-root manager passing this gate is a currently TESTED contract
-    // (tests/integration/admin/project-assign-directory.test.ts, case (d)).
-    // Closing that gap is an owner decision, not a silent one.
-    if (
-      !sameRegion(session.regionId, project.regionId) ||
-      !isWithin(project.couPath, session.orgPath)
-    ) {
-      throw createError({
+    // Third conjunct, as in the twins: a caller whose own home IS the region root
+    // has the whole region as a "subtree", so they are refused.
+    const scopeDenied = () =>
+      createError({
         statusCode: 403,
         statusMessage: 'Forbidden',
         data: {
@@ -87,7 +92,14 @@ export async function assertProjectScope(event: H3Event, project: ProjectScope):
           detail: 'This project is not within your region and org subtree.',
         },
       })
+    if (
+      !sameRegion(session.regionId, project.regionId) ||
+      !isWithin(project.couPath, session.orgPath)
+    ) {
+      throw scopeDenied()
     }
+    const [home] = await tx.execute<{ ok: boolean }>(sql`SELECT ${placedBelowRegionRootPredicate()} AS ok`)
+    if (home?.ok !== true) throw scopeDenied()
     return
   }
   // platform-admin are org-wide by design.

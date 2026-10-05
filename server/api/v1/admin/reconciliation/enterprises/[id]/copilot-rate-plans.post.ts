@@ -11,7 +11,7 @@
  * `validFrom` is auto-truncated to end at `validFrom` in the SAME audited write (the
  * ordinary "this plan supersedes the current one" workflow); any OTHER overlap 409s.
  *
- * RBAC: requireRole(admin) + assertSameOrigin. Audited.
+ * RBAC: requireRole(platform-admin) + assertSameOrigin. Audited.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { sql } from 'drizzle-orm'
@@ -39,7 +39,8 @@ const Body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const caller = await requireRole(event, 'admin')
+  // provider_enterprise has no region column, so platform-admin is the only clamp.
+  const caller = await requireRole(event, 'platform-admin')
   assertSameOrigin(event)
   const providerEnterpriseId = requireUuidParam(event, 'id', 'provider-enterprise id')
   const body = await readValidated(event, Body)

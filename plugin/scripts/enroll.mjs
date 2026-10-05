@@ -30,8 +30,9 @@
  * if Claude's oauth email is unavailable. If neither yields an `@` address we SKIP
  * enrolment rather than claim a bad email.
  *
- * DEVICE BINDING (a server-side dedup hint only — NOT an auth factor; the server
- * HMAC-hashes it at rest): a stable per-host id = `<hostname>:<machine-id>`, where
+ * DEVICE BINDING (a display hint only — NOT an auth factor and NOT a dedup key;
+ * the server HMAC-hashes it at rest, and every enrol mints a fresh provisional
+ * device even for a binding seen before): a stable per-host id = `<hostname>:<machine-id>`, where
  * machine-id is /etc/machine-id when present, else ~/.claude.json machineID, else
  * just the hostname. Per-host matches the instance model (the enrolment lives in
  * the shared ~/.claude/settings.json, so all containers on a host share it).
@@ -129,9 +130,9 @@ export function readClaimedEmail({ cwd = process.cwd(), home = homedir() } = {})
 }
 
 /**
- * A stable per-host device-binding hint. The server treats this as an opaque
- * dedup key (HMAC-hashed at rest), never an auth factor, so a best-effort stable
- * value is sufficient.
+ * A stable per-host device-binding hint. The server stores it HMAC-hashed as a
+ * display hint only — never a dedup key or an auth factor — so a best-effort
+ * stable value is sufficient.
  */
 export function computeDeviceBinding({ home = homedir() } = {}) {
   let machineId = ''

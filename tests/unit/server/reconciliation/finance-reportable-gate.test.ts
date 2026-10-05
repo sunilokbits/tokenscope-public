@@ -3,7 +3,7 @@
  * Enforcement: the finance cross-charge surfaces are BILL-ANCHORED (mig 0059).
  * Money = the provider bill homed to the cost-owning unit
  * (v_finance_bill_chargeback); the per-project split = v_finance_project_overlay
- * (the bill scaled across tagged projects + the untagged remainder). Neither may
+ * (the bill split by tagged share + the untagged share, mig 0146). Neither may
  * SUM attribution_record directly for a charge — that is the OTel estimate, not
  * the bill.
  *
