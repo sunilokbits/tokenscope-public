@@ -89,7 +89,7 @@ export default defineEventHandler(async (event) => {
     if (!proj) {
       throw createError({ statusCode: 404, statusMessage: 'Project not found' })
     }
-    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path })
+    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path }, tx)
 
     // Resolve the member teammate to assign.
     //  - oid path: find-or-provision from the directory pick. The resulting

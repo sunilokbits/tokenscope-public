@@ -98,6 +98,19 @@ function projectLocalDir(cwd = process.cwd()) {
   return join(cwd, PROJECT_LOCAL_DIRNAME)
 }
 
+/**
+ * True when `<cwd>/.tokenscope.local` exists and is NOT a real directory (a
+ * committed symlink): nothing under it may be read or written
+ * (client-plugins:idor:0001). Absent is false. Exported for unit testing.
+ */
+export function projectLocalDirRedirected(cwd = process.cwd()) {
+  try {
+    return !fs.lstatSync(projectLocalDir(cwd)).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 // PID lock + offset live in the PROJECT-local dir (per-project singleton + offset).
 // The TOKENSCOPE_FWD_PID_FILE / TOKENSCOPE_FWD_OFFSET_FILE env vars override the paths
 // (used by unit tests for isolation); otherwise they resolve under <cwd>/.tokenscope.local.
@@ -361,6 +374,12 @@ export function readNewSpans(filePath) {
   // Provenance guard — see the block comment above. A refusal is silent-to-the-
   // batch (empty array) but loud on stderr so a genuinely misplaced/hostile file
   // is debuggable rather than a mysterious "nothing forwards".
+  if (projectLocalDirRedirected()) {
+    console.error(
+      `[tokenscope-fwd] refusing ${filePath}: ${PROJECT_LOCAL_DIRNAME} is not a real directory (provenance guard)`,
+    )
+    return []
+  }
   if (isForeignOwned(st)) {
     console.error(
       `[tokenscope-fwd] refusing ${filePath}: not owned by this process's uid (provenance guard)`,
@@ -716,6 +735,13 @@ async function main() {
     mode = '--final-forward'
   } else {
     mode = rawMode ?? '--start'
+  }
+
+  if (projectLocalDirRedirected()) {
+    console.error(
+      `[tokenscope-fwd] ${PROJECT_LOCAL_DIRNAME} in ${process.cwd()} is not a real directory (a symlink?) — refusing to read or write under it; forwarder idle.`,
+    )
+    process.exit(0)
   }
 
   // Not provisioned yet (tokenscope-setup never run on this host): there is

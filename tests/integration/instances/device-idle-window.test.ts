@@ -358,14 +358,6 @@ describe('a device session-gc ends mid-request is never renewed or re-issued', (
     ).rejects.toMatchObject({ statusCode: 401 })
   })
 
-  it('provisional re-enrol: the ended row is not reused; a fresh device is minted', async () => {
-    const enrol = () =>
-      t.db.transaction((tx) => locateOrCreateProvisionalInstance(tx as never, 'diw-race@x.test', 'diw-device-race'))
-    const first = (await enrol()) as { instanceId: string }
-    const res = await underConcurrentClose(first.instanceId, enrol)
-    expect(res).toMatchObject({ reused: false })
-  })
-
   it('re-provision: the ended row is not reused; a fresh device is minted', async () => {
     const instanceId = await enrolDevice(ownerId, 10)
     const tm = { teammateId: ownerId, principalOid: 'oid-diw', email: 'diw@x.test', regionId, orgUnitId: ouId }
@@ -417,18 +409,18 @@ describe('soft-purge retires ENDED devices only', () => {
   })
 })
 
-describe('provisional re-enrolment (/setup/enroll) renews the window too', () => {
-  it('reusing a provisional device near its 90th day pushes ts_expected_end a full window out', async () => {
+describe('provisional enrolment (/setup/enroll) starts a full window', () => {
+  it('a re-enrol mints a new device with a full window and leaves the existing device untouched', async () => {
     const enrol = () =>
       t.db.transaction((tx) => locateOrCreateProvisionalInstance(tx as never, 'diw-prov@x.test', 'diw-device-1'))
-    const first = (await enrol()) as { instanceId: string; reused: boolean }
-    expect(first.reused).toBe(false)
+    const first = (await enrol()) as { instanceId: string }
     await t.client`UPDATE instance_attestation SET ts_expected_end = now() + interval '1 day'
                     WHERE instance_id = ${first.instanceId}::uuid`
 
-    const again = (await enrol()) as { instanceId: string; reused: boolean }
-    expect(again).toMatchObject({ instanceId: first.instanceId, reused: true })
-    expect(await expectedEndInDays(first.instanceId)).toBeGreaterThan(FULL_WINDOW_DAYS - 1)
+    const again = (await enrol()) as { instanceId: string }
+    expect(again.instanceId).not.toBe(first.instanceId)
+    expect(await expectedEndInDays(again.instanceId)).toBeGreaterThan(FULL_WINDOW_DAYS - 1)
+    expect(await expectedEndInDays(first.instanceId)).toBeLessThan(2)
   })
 })
 

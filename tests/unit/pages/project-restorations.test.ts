@@ -147,6 +147,7 @@ async function mountPage(data: Payload) {
     src: ref<string | null>(null),
     patch: vi.fn(),
   }))
+  vi.stubGlobal('usePersonalLens', () => ref<'usage' | 'chargeback'>('usage'))
   vi.stubGlobal('useFetch', (_url: unknown, opts?: { query?: { value?: Record<string, unknown> } }) => {
     // The MEMBER-depth fetch is the one under test. The reports-depth fetch
     // carries `src` in its query — that is how the two are told apart here

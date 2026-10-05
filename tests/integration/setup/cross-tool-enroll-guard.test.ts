@@ -19,10 +19,10 @@
  * claude credential. Identical blast radius to the bug the sibling file
  * documents, through a route that needs no authentication.
  *
- * The fix here is PARTITION, not 409. On this path the dedup key is IMPLICIT
- * (the client asserts no instance id; the server derives one from
- * (email, device)), so two tools on one host legitimately need two instances.
- * A 409 would also turn an unauthenticated route into an enrolled-email oracle.
+ * The enrol path now mints a fresh instance on every call (TS-EDGE-01), so no
+ * enrol can reach another instance's credential, whatever the tool. Two tools
+ * on one host get two instances; a 409 would turn an unauthenticated route
+ * into an enrolled-email oracle.
  *
  * These tests assert the property that actually matters — the FIRST tool's
  * credential is still LIVE afterwards — not merely that the ids differ.
@@ -134,7 +134,6 @@ describe('enrol path — cross-tool device reuse is partitioned, not shared', ()
     if ('capExceeded' in copilot) throw new Error('unexpected cap')
 
     expect(copilot.instanceId).not.toBe(claude.instanceId)
-    expect(copilot.reused).toBe(false)
     // The two instances carry SEPARATE shadow teammates. That is the accepted
     // cost of partitioning (see the long note in enroll-provision.ts): sharing
     // one shadow would be nicer, but "a fresh shadow per (email, device)" is an
@@ -183,7 +182,7 @@ describe('enrol path — cross-tool device reuse is partitioned, not shared', ()
     expect(await credentialIsLive(claudeRefresh)).toBe(true)
   })
 
-  it('re-enrolling the SAME tool is still idempotent — partitioning did not break dedup', async () => {
+  it('re-enrolling the SAME tool mints a new instance and leaves the first credential live (TS-EDGE-01)', async () => {
     const email = 'enrol-tool-3@example.com'
     const device = 'device-enrol-3'
 
@@ -193,15 +192,20 @@ describe('enrol path — cross-tool device reuse is partitioned, not shared', ()
       device,
       'copilot-cli',
     )
+    if ('capExceeded' in first) throw new Error('unexpected cap')
+    const firstRefresh = await mintEmitCredential(first.teammateId, first.instanceId)
+
     const second = await locateOrCreateProvisionalInstance(
       t.db as never,
       email,
       device,
       'copilot-cli',
     )
-    if ('capExceeded' in first || 'capExceeded' in second) throw new Error('unexpected cap')
-    expect(second.reused).toBe(true)
-    expect(second.instanceId).toBe(first.instanceId)
+    if ('capExceeded' in second) throw new Error('unexpected cap')
+    await mintEmitCredential(second.teammateId, second.instanceId)
+
+    expect(second.instanceId).not.toBe(first.instanceId)
+    expect(await credentialIsLive(firstRefresh)).toBe(true)
   })
 
   it('rotation on one tool revokes only THAT tool — proving the partition is the thing protecting it', async () => {

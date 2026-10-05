@@ -156,29 +156,9 @@ export function discoverMcpOrigin(scriptsDir, { client, home = realHome() } = {}
     // the human who ran the registration; a repo is not.
     ...ownFirst,
     // Whatever shipped in the bundle. This is the BAKED default: correct for a
-    // stock install, wrong for a custom registration, hence last.
-    //
-    // THIS TIER IS ASYMMETRIC BETWEEN THE TWO CLIENTS, and on the Claude side it
-    // never fires. `plugin/.mcp.json` ships the literal text
-    // `${TOKENSCOPE_API_BASE:-https://…}/api/v1/mcp` — Claude Code expands that at
-    // registration time and the FILE never changes, so `new URL()` here raises
-    // ERR_INVALID_URL and this candidate yields null. `copilot-plugin/.mcp.json`
-    // ships a literal URL (Copilot CLI does not expand ${VAR} at all), so the
-    // same tier does resolve there. Verified 2026-07-28.
-    //
-    // Deliberately NOT fixed by expanding the template, which would be the
-    // obvious move and is the wrong one: expansion reads TOKENSCOPE_API_BASE,
-    // which is repo-suppliable, so it would reintroduce "a checked-out repository
-    // chooses where a credential goes" through a FILE after that exact hole was
-    // closed in the environment. Extracting only the `:-` default half would
-    // parse safely but return the baked value, which is where the caller lands
-    // anyway when every candidate misses.
-    //
-    // The consequence to know, rather than to work around: on a stock Claude
-    // install there is nothing to discover — no user-scope entry (a plugin's own
-    // .mcp.json is not written into ~/.claude.json) and no readable bundle — so
-    // resolveApiBase lands on its baked default. Discovery is what serves the
-    // operator who ran `claude mcp add` by hand, and only them.
+    // stock install, wrong for a custom registration, hence last. Both plugins
+    // ship a literal URL here; a ${VAR} template is never expanded (it would let
+    // a repository choose where a credential goes) and yields null.
     () => originFromMcpConfig(join(scriptsDir, '..', '.mcp.json')),
     () => originFromMcpConfig(join(scriptsDir, '.mcp.json')),
   ]

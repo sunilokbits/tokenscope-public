@@ -43,7 +43,7 @@ export default defineEventHandler(async (event) => {
     if (!proj) {
       throw createError({ statusCode: 404, statusMessage: 'Project not found' })
     }
-    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path })
+    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path }, tx)
 
     // J2: each member's HOME cost-owning unit — the nearest CoU ancestor of
     // their org unit (or the unit itself). Cross-CC membership is normal

@@ -192,7 +192,7 @@ developers at yours, either:
 1. **Fork and set your host (recommended).** In your fork, set your deployment's
    URL (`https://<your-host>`) in all four places that must agree:
    - `plugin/scripts/api-base.mjs` — `DEFAULT_API_BASE`
-   - `plugin/.mcp.json` — the default inside `${TOKENSCOPE_API_BASE:-…}/api/v1/mcp`
+   - `plugin/.mcp.json` — the literal `url`
    - `copilot-plugin/.mcp.json` — the literal `url` (Copilot does not expand `${VAR}`)
    - `copilot-plugin/scripts/enroll.mjs` — its own `DEFAULT_API_BASE`
 
@@ -328,13 +328,12 @@ The load-bearing detail. Claude Code emits OTLP **directly** to Azure Monitor �
 
 ### Project tag in the repo file
 
-The repo tag (`writeRepoTag`) copies the device env into a tagged repo's
-`.claude/settings.local.json` with `OTEL_RESOURCE_ATTRIBUTES` carrying
-`project.code_hash`, **minus** the telemetry-enabling keys
-(`CLAUDE_CODE_ENABLE_TELEMETRY`, the OTel exporters, the logs endpoint and protocol).
-Claude Code 2.1.283 refuses those from a project settings file and warns at startup;
-they apply from `~/.claude/settings.json`. The project tag still applies from the repo
-file (measured on Claude Code 2.1.232 and 2.1.283). Supported CLI builds are
+The repo tag (`writeRepoTag`) writes a tagged repo's `.claude/settings.local.json`
+with the helper path and one env key, `OTEL_RESOURCE_ATTRIBUTES` carrying
+`project.code_hash`. Every other key applies from `~/.claude/settings.json`, because
+Claude Code merges `env` per key; none is copied into the repo. A git-tracked
+`settings.local.json` is never written. The project tag applies from the repo file
+(measured on Claude Code 2.1.232 and 2.1.283). Supported CLI builds are
 roughly the last 4-6 weeks.
 
 The Content-Length forwarder that worked around the chunked-OTLP regression in CLI

@@ -704,7 +704,8 @@ export async function fetchCopilotPool(
 // ── Drill: project overlay (chargeable split, Anthropic) ──────────────────────
 /**
  * The CoU's tagged project split from `v_finance_project_overlay` (chargeable-only,
- * Anthropic; overlay excludes Copilot + exempt). The rows sum back to the CoU's
+ * Anthropic; overlay excludes Copilot + exempt; bill split proportionally by
+ * tagged share, docs/design/project-chargeback-lens.md). The rows sum back to the CoU's
  * Anthropic chargeable (the untagged remainder is an explicit "Untagged" bucket).
  */
 export async function fetchFinanceProjectOverlay(

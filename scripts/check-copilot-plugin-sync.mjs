@@ -8,9 +8,8 @@
  *
  * Also verifies (PLG-9) that the baked TokenScope API host is CONSISTENT across
  * the four uncoordinated places it lives: plugin/scripts/api-base.mjs
- * (DEFAULT_API_BASE), plugin/.mcp.json (the ${TOKENSCOPE_API_BASE:-…} default),
- * copilot-plugin/.mcp.json (a literal URL — Copilot CLI does not expand
- * ${VAR}), and copilot-plugin/scripts/enroll.mjs (its own DEFAULT_API_BASE — an
+ * (DEFAULT_API_BASE), plugin/.mcp.json (a literal URL), copilot-plugin/.mcp.json
+ * (a literal URL), and copilot-plugin/scripts/enroll.mjs (its own DEFAULT_API_BASE — an
  * un-vendored file the parity check above cannot see). A partial host update
  * silently splits the plugin: MCP talks to one server while redeem/emit talk to
  * another.
@@ -143,12 +142,11 @@ function apiBaseHost() {
   return m ? originOf(m[1]) : null
 }
 
-/** plugin/.mcp.json — the ${TOKENSCOPE_API_BASE:-<default>} fallback in the url. */
+/** plugin/.mcp.json — a literal URL; a ${VAR} would let a repository choose the host (AG-CP-01). */
 function claudeMcpHost() {
   const cfg = JSON.parse(readFileSync(resolve(root, 'plugin/.mcp.json'), 'utf8'))
   const url = cfg?.mcpServers?.tokenscope?.url ?? ''
-  const m = url.match(/\$\{TOKENSCOPE_API_BASE:-([^}]+)\}/)
-  return originOf(m ? m[1] : url)
+  return url.includes('${') ? null : originOf(url)
 }
 
 /** copilot-plugin/.mcp.json — a literal URL (Copilot CLI does not expand ${VAR}). */
@@ -175,7 +173,7 @@ function copilotEnrollHost() {
 
 const hosts = [
   { where: 'plugin/scripts/api-base.mjs (DEFAULT_API_BASE)', host: apiBaseHost() },
-  { where: 'plugin/.mcp.json (mcpServers.tokenscope.url default)', host: claudeMcpHost() },
+  { where: 'plugin/.mcp.json (mcpServers.tokenscope.url, literal)', host: claudeMcpHost() },
   { where: 'copilot-plugin/.mcp.json (mcpServers.tokenscope.url)', host: copilotMcpHost() },
   { where: 'copilot-plugin/scripts/enroll.mjs (DEFAULT_API_BASE)', host: copilotEnrollHost() },
 ]

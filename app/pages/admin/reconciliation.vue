@@ -42,6 +42,9 @@ const canRunWorkers = computed(() => {
   const r = session.value?.role
   return r === 'platform-admin'
 })
+// Estate-wide provider config (enterprises, unmapped orgs) and run detail are
+// platform-admin only server-side; hide those controls from region admins.
+const isPlatformAdmin = computed(() => session.value?.role === 'platform-admin')
 
 // URL-synced tab (?tab=runs|records|providers) so a tab is deep-linkable and
 // reload-safe — and so the "Providers" sidebar entry can land directly on the
@@ -1154,7 +1157,7 @@ function onBackfillSaved() {
     >
       <template #actions>
         <UiButton
-          v-if="tab === 'providers'"
+          v-if="tab === 'providers' && isPlatformAdmin"
           kind="primary"
           size="sm"
           data-testid="admin-recon-add-enterprise"
@@ -1254,7 +1257,7 @@ function onBackfillSaved() {
       <UiCard>
         <ul v-if="runs?.runs.length" class="divide-y divide-carbon-6">
           <li v-for="r in runs.runs" :key="r.id" :data-testid="`admin-recon-run-${r.id}`">
-            <button class="w-full flex items-center justify-between py-3 gap-4 text-left" @click="openRun(r.id)">
+            <button class="w-full flex items-center justify-between py-3 gap-4 text-left" :disabled="!isPlatformAdmin" @click="openRun(r.id)">
               <div class="flex items-center gap-3 min-w-0">
                 <UiBadge :kind="statusBadge(r.status).kind">{{ statusBadge(r.status).label }}</UiBadge>
                 <span class="font-mono text-sm text-carbon truncate">{{ r.worker }}</span>
@@ -1527,6 +1530,7 @@ function onBackfillSaved() {
                 </td>
                 <td class="py-2 pr-3 text-right whitespace-nowrap">
                   <UiButton
+                    v-if="isPlatformAdmin"
                     kind="ghost"
                     size="sm"
                     :data-testid="`admin-recon-ent-edit-${e.id}`"
@@ -1578,7 +1582,7 @@ function onBackfillSaved() {
                     Backfill
                   </UiButton>
                   <UiButton
-                    v-if="e.orgCount === 0"
+                    v-if="isPlatformAdmin && e.orgCount === 0"
                     kind="ghost"
                     size="sm"
                     :disabled="deleting.has(e.id)"
@@ -1588,7 +1592,7 @@ function onBackfillSaved() {
                     {{ deleting.has(e.id) ? '…' : 'Delete' }}
                   </UiButton>
                   <span
-                    v-else
+                    v-else-if="isPlatformAdmin"
                     class="text-[11px] text-carbon-3 italic cursor-help ml-1"
                     title="This enterprise has linked orgs. Re-link or delete them first (the API would 409)."
                     :data-testid="`admin-recon-ent-delete-blocked-${e.id}`"
@@ -1709,6 +1713,7 @@ function onBackfillSaved() {
                 </td>
                 <td class="py-2 pr-3 text-right whitespace-nowrap">
                   <UiButton
+                    v-if="isPlatformAdmin || o.regionId"
                     kind="ghost"
                     size="sm"
                     :data-testid="`admin-recon-org-edit-${o.id}`"
@@ -1727,6 +1732,7 @@ function onBackfillSaved() {
                     Backfill
                   </UiButton>
                   <UiButton
+                    v-if="isPlatformAdmin || o.regionId"
                     kind="ghost"
                     size="sm"
                     :disabled="deleting.has(o.id)"

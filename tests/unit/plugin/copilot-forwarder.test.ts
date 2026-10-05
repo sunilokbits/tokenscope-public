@@ -11,10 +11,10 @@
  * The forwarder exports these functions specifically to make this suite possible.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import fs, { mkdtempSync, writeFileSync, rmSync, writeSync, openSync, closeSync } from 'node:fs'
-import { execFileSync } from 'node:child_process'
+import fs, { mkdtempSync, mkdirSync, writeFileSync, rmSync, writeSync, openSync, closeSync, symlinkSync, readdirSync } from 'node:fs'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 // The forwarder reads TOKENSCOPE_FWD_OFFSET_FILE ONCE at module load, so the
 // override must be in place BEFORE the dynamic import — setting it in beforeEach
@@ -28,7 +28,7 @@ process.env.TOKENSCOPE_FWD_OFFSET_FILE = offsetFile
 // @ts-ignore — mjs import resolved by Vitest
 const {
   readNewSpans, loadPersistedOffset, persistOffset, _resetStateForTest, clampForwardIntervalMs,
-  isForeignOwned, isGitTracked, readAndForward,
+  isForeignOwned, isGitTracked, readAndForward, projectLocalDirRedirected,
 } = await import('../../../plugin/scripts/copilot-forwarder.mjs')
 
 // ── Shared span line builders ─────────────────────────────────────────────────
@@ -362,5 +362,51 @@ describe('readNewSpans / readAndForward — provenance guard integration', () =>
     vi.spyOn(fs, 'statSync').mockReturnValue({ ...realStat, uid: process.getuid() } as ReturnType<typeof fs.statSync>)
 
     expect(readNewSpans(spanFile)).toHaveLength(1)
+  })
+})
+
+// client-plugins:idor:0001 — a committed symlink `.tokenscope.local -> evil/` slips
+// past the git-tracked check (git refuses a pathspec beyond a symlink) and the uid
+// check (the victim owns the checkout). The directory itself is refused.
+describe('symlinked .tokenscope.local — refused before any read or write', () => {
+  const savedCwd = process.cwd()
+  afterEach(() => process.chdir(savedCwd))
+
+  function plantSymlinkedProjectDir() {
+    const evil = join(dir, 'evil')
+    mkdirSync(evil)
+    writeFileSync(join(evil, 'copilot-otel.jsonl'), chatSpanLine({ spanId: 'forged' }) + '\n')
+    symlinkSync(evil, join(dir, '.tokenscope.local'))
+    return { evil, span: join(dir, '.tokenscope.local', 'copilot-otel.jsonl') }
+  }
+
+  it('projectLocalDirRedirected: true for a symlink, false for a real dir or absent', () => {
+    expect(projectLocalDirRedirected(dir)).toBe(false)
+    mkdirSync(join(dir, '.tokenscope.local'))
+    expect(projectLocalDirRedirected(dir)).toBe(false)
+    rmSync(join(dir, '.tokenscope.local'), { recursive: true })
+    plantSymlinkedProjectDir()
+    expect(projectLocalDirRedirected(dir)).toBe(true)
+  })
+
+  it('readNewSpans returns nothing for a span file reached through the symlink', () => {
+    initGitRepo(dir)
+    const { span } = plantSymlinkedProjectDir()
+    process.chdir(dir)
+    expect(readNewSpans(span)).toEqual([])
+  })
+
+  it('the forwarder process refuses at startup and writes nothing under the link target', () => {
+    const { evil } = plantSymlinkedProjectDir()
+    const r = spawnSync(process.execPath, [resolve(__dirname, '../../../copilot-plugin/scripts/copilot-forwarder.mjs'), 'start'], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH, HOME: dir },
+      timeout: 15_000,
+    })
+    expect(r.status).toBe(0)
+    expect(r.stderr).toContain('.tokenscope.local in')
+    expect(r.stderr).toContain('is not a real directory')
+    expect(readdirSync(evil)).toEqual(['copilot-otel.jsonl'])
   })
 })

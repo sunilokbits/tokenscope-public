@@ -70,7 +70,7 @@ export function teammateDimensionSnapshotSql(teammateIdSql: SQL): TeammateDimens
       SELECT anc.id
       FROM teammate home_t
       JOIN org_unit home ON home.id = home_t.org_unit_id
-      JOIN org_unit anc ON home.path <@ anc.path
+      JOIN org_unit anc ON home.path <@ anc.path AND anc.region_id = home.region_id
       WHERE home_t.id = ${teammateIdSql} AND anc.is_cost_owning_unit AND anc.retired_at IS NULL
       ORDER BY nlevel(anc.path) DESC LIMIT 1
     )`,

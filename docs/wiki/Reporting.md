@@ -94,15 +94,27 @@ Only the billed lane carries a region axis — the billed engine (`BILLED_AXES`)
 and the pooled-chargeback arm both group by `region_id`, which is what the
 chargeback-by-region ranking is built on.
 
-**The budget axis does not move, and that is a fact about the source.**
-`provider_usage_fact` has no project column and the provider API has no concept
-of a project (`target-state-data-architecture.md` §3 — only OTel carries the
-session). The only way to put billed money on a budget axis is to invent a
-split, which is the coverage ratio §5 of that document deleted. So the axis sums
-the tags the shipped attribution already carries — OTel sessions **and**
-provider-recorded days (shadow fill, one row per `(teammate, day, tool)`
-carrying one tagging decision) — and names the unallocated remainder. An
-untagged teammate-day lands there **whole**; it is never apportioned.
+**The budget axis does not move.** It ranks projects on attributed usage in
+both lanes. `provider_usage_fact` has no project column and the provider API has
+no concept of a project (`target-state-data-architecture.md` §3 — only OTel
+carries the session). The axis sums the tags the shipped attribution already
+carries: OTel sessions **and** provider-recorded days (shadow fill, one row per
+`(teammate, day, tool)` carrying one tagging decision). It names the unallocated
+remainder, and an untagged teammate-day lands there **whole**.
+
+**A project's bill-based figure lives on the project page.** Its
+`Chargeback · billed` toggle reads `v_finance_project_overlay` (mig 0146). Per
+`(teammate, UTC day, tool)`, the chargeable Anthropic bill `B` is split by
+tagged share:
+
+    charge(P) = B × weight(P) / Σ weights
+
+- **Weights:** OTel tagged to P, untagged OTel, and worklist days tagged to P.
+- **Weight population:** the same as the needs-tagging residual subtracts.
+- **Untagged weight** stays untagged and is never charged to a project.
+
+Every row is a bill dollar, and one cell's rows sum to `B`. Exempt bill and
+Copilot (pooled per Business Unit) never reach a project.
 
 **A billed figure is discriminated by provider before anything is summed.**
 `provider_usage_fact.cost_usd` is BILLED money on an Anthropic row and gross AI

@@ -234,8 +234,8 @@ const neverRolledUp = computed(() => data.value?.page_freshness?.projects_never_
     <div class="flex items-center gap-2 mb-3">
       <UiBadge kind="neutral" data-testid="projects-lane-pill">§A · month to date</UiBadge>
       <InfoDot label="About these figures">
-        Indicative attributed usage (§A). Budgets are monthly and chargeback is not a project
-        construct, so there is no lane toggle here. Month-to-date burn and your contribution are
+        Indicative attributed usage (§A), the lens budgets read, so there is no lane toggle
+        here; each project's own page has a Chargeback lens. Month-to-date burn and your contribution are
         live off the §A lane; the velocity flag comes from the
         rollup<template v-if="aggregateAge">, last refreshed {{ aggregateAge }} ago for the least
           recently updated project</template>.<template v-if="neverRolledUp > 0">

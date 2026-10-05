@@ -67,7 +67,7 @@ beforeAll(async () => {
   // 2 attribution rows for priya, 1 for ani — distinct dev count = 2.
   const [rc] = await t.db.select({ id: schema.rateCard.id, version: schema.rateCard.version }).from(schema.rateCard).limit(1)
   const monthStart = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 5))
-  async function emit(who: string, cost: number) {
+  async function emit(who: string, cost: number, tagged = true) {
     const sid = randomUUID()
     await t.db.insert(schema.instanceAttestation).values({
       instanceId: sid,
@@ -85,7 +85,7 @@ beforeAll(async () => {
     await t.db.insert(schema.attributionRecord).values({
       instanceId: sid,
       teammateId: who,
-      projectId,
+      projectId: tagged ? projectId : null,
       regionId,
       orgUnitId,
       costOwningUnitId: orgUnitId,
@@ -104,11 +104,13 @@ beforeAll(async () => {
   await emit(priyaId, 5.5)
   await emit(priyaId, 4.5)
   await emit(aniId, 10)
+  await emit(aniId, 5, false)
 
   // BILL-ANCHORED: the provider bill per teammate (homed to this CoU, since both
-  // teammates sit directly at the cost-owning unit). Priya OTel-tagged 10 on a
-  // bill of 12 -> projA 10 + untagged 2; Ani OTel-tagged 10 on a bill of 15 ->
-  // projA 10 + untagged 5. Aggregated: projA = 20, untagged = 7, CoU bill = 27.
+  // teammates sit directly at the cost-owning unit), split by tagged share
+  // (mig 0146). Priya: all 10 of OTel tagged, bill 12 -> projA 12. Ani: 10
+  // tagged + 5 untagged OTel, bill 15 -> projA 10 + untagged 5. Aggregated:
+  // projA = 22, untagged = 5, CoU bill = 27.
   const billDay = new Date(Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 5))
     .toISOString()
     .slice(0, 10)
@@ -146,7 +148,7 @@ describe('finance breakdown SQL contract (bill-anchored)', () => {
     expect(list.length).toBe(1)
     expect(list[0]?.project_code).toBe('FIN-AAA')
     expect(list[0]?.dev_count).toBe('2')
-    expect(Number(list[0]?.total_cost_usd)).toBeCloseTo(20, 6) // priya 10 + ani 10 (both within bill)
+    expect(Number(list[0]?.total_cost_usd)).toBeCloseTo(22, 6) // priya 12 + ani 10
   })
 
   it('untagged remainder + projects sum to the CoU BILL (read directly from the overlay)', async () => {
@@ -158,7 +160,7 @@ describe('finance breakdown SQL contract (bill-anchored)', () => {
         AND o.period_date >= ${monthStart}::date
         AND o.period_date <  ${monthEnd}::date
     `)
-    expect(Number([...untagged][0]?.untagged)).toBeCloseTo(7, 6) // priya 2 + ani 5
+    expect(Number([...untagged][0]?.untagged)).toBeCloseTo(5, 6) // ani's untagged share
 
     const total = await t.db.execute<{ total: string }>(sql`
       SELECT COALESCE(SUM(o.charge_usd), 0)::text AS total

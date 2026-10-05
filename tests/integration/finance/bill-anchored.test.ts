@@ -7,17 +7,18 @@
  * Model: finance = the provider bill (`actual_spend`) per user, homed to the
  * NEAREST cost-owning ancestor of that user's org_unit via LTREE
  * (v_finance_bill_chargeback). OTel is ONLY the project overlay — the bill split
- * across tagged projects (scaled never to exceed the bill) + the untagged
- * remainder (v_finance_project_overlay), which sums back to the bill.
+ * proportionally by tagged share (mig 0146) + the untagged share
+ * (v_finance_project_overlay), which sums back to the bill.
  *
  * Covers:
  *   - ancestor resolver: home under a CoU -> that CoU; home AT a CoU -> itself;
  *     home with no cost-owning ancestor -> NULL (unallocated bucket); a RETIRED
  *     ancestor is skipped.
  *   - bill_chargeback sums across actual_spend.source.
- *   - overlay: bill + zero OTel -> all untagged; OTel < bill -> untagged =
- *     bill − tagged; OTel > bill -> tagged scaled to bill, untagged 0; the rows
- *     for a (teammate, day, tool) sum to bill_usd.
+ *   - overlay: bill + zero OTel -> all untagged; otherwise each project gets
+ *     bill × its weight ÷ all weights (tagged + untagged OTel), whether OTel is
+ *     below or above the bill; the rows for a (teammate, day, tool) sum to
+ *     bill_usd.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { randomUUID } from 'node:crypto'
@@ -67,7 +68,7 @@ async function bill(
 }
 
 /** Emit a tagged OTel attribution row (source='attribution', estimated). */
-async function tag(teammateId: string, projectId: string, costUsd: string): Promise<void> {
+async function tag(teammateId: string, projectId: string | null, costUsd: string): Promise<void> {
   const instanceId = randomUUID()
   await t.db.insert(schema.instanceAttestation).values({
     instanceId,
@@ -217,27 +218,29 @@ describe('v_finance_project_overlay — the bill split', () => {
     expect([...o.keys()].filter((k) => k !== null)).toHaveLength(0) // no project rows
   })
 
-  it('OTel < bill -> untagged = bill − tagged', async () => {
+  it('OTel < bill -> the whole bill split by tagged share (mig 0146)', async () => {
     const tm = await mkTeammate(teamId, 'under-bill')
     await bill(tm, '100.00')
     await tag(tm, projA, '40.00')
+    await tag(tm, null, '10.00') // untagged OTel keeps its share
     const o = await overlay(tm)
-    expect(o.get(projA)).toBeCloseTo(40, 6) // not scaled (OTel below bill)
-    expect(o.get(null)).toBeCloseTo(60, 6) // 100 - 40
+    // weights A 40, untagged 10 -> A = 100 × 40/50, untagged = 100 × 10/50
+    expect(o.get(projA)).toBeCloseTo(80, 6)
+    expect(o.get(null)).toBeCloseTo(20, 6)
     const sum = [...o.values()].reduce((a, b) => a + b, 0)
     expect(sum).toBeCloseTo(100, 6)
   })
 
-  it('OTel > bill -> tagged scaled to bill, untagged 0', async () => {
+  it('OTel > bill -> tagged split of the bill, no untagged share', async () => {
     const tm = await mkTeammate(teamId, 'over-bill')
     await bill(tm, '50.00')
     await tag(tm, projA, '50.00')
     await tag(tm, projB, '30.00') // tagged OTel total 80 > bill 50
     const o = await overlay(tm)
-    // scale = 50/80 = 0.625
+    // shares 50/80 and 30/80 of the bill
     expect(o.get(projA)).toBeCloseTo(31.25, 6)
     expect(o.get(projB)).toBeCloseTo(18.75, 6)
-    expect(o.get(null)).toBeCloseTo(0, 6) // GREATEST(0, 50 - 80)
+    expect(o.get(null) ?? 0).toBeCloseTo(0, 6) // no untagged weight
     const sum = [...o.values()].reduce((a, b) => a + b, 0)
     expect(sum).toBeCloseTo(50, 6) // sums back to the bill
   })

@@ -149,12 +149,11 @@ export type MeasureLane = 'attributed' | 'billed'
  *
  * THE BUDGET AXIS IS WHY THIS IS NOT DECORATION. Selecting the chargeback lane
  * moves teammate / cost-centre / surface / model onto `provider_usage_fact`, but
- * the budget axis CANNOT move: `provider_usage_fact` has no project column, the
- * provider API has no concept of a project, and splitting a billed day across
- * budgets by an OTel share is precisely the apportionment
- * target-state-data-architecture.md §5 deleted. So in the chargeback lane the
- * budget axis still answers `attributed`, and this map is where it says so
- * rather than letting the reader assume the lane from the toggle.
+ * the budget axis does not: `provider_usage_fact` has no project column, and the
+ * project chargeback split (`v_finance_project_overlay`) is served on the
+ * project page, not on this axis. So in the chargeback lane the budget axis
+ * still answers `attributed`, and this map is where it says so rather than
+ * letting the reader assume the lane from the toggle.
  */
 export type MeasureLanes = Record<string, MeasureLane>
 

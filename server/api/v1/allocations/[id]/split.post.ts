@@ -83,7 +83,7 @@ export default defineEventHandler(async (event) => {
     if (!pool) {
       throw createError({ statusCode: 404, statusMessage: 'Pool allocation not found' })
     }
-    await assertProjectScope(event, { regionId: pool.region_id, couPath: pool.cou_path })
+    await assertProjectScope(event, { regionId: pool.region_id, couPath: pool.cou_path }, tx)
 
     if (body.mode === 'shared_pool') {
       await tx.execute(sql`

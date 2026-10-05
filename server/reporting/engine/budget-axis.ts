@@ -1,25 +1,16 @@
 /*
- * The BUDGET axis — the one axis the chargeback lane cannot answer from the
- * billed lane, and the reason it says so instead of guessing.
+ * The BUDGET axis of the regional and Business Unit drivers — attributed (§A)
+ * usage in BOTH lenses, and it says so.
  *
- * ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────
+ * ── WHY THIS AXIS STAYS ATTRIBUTED ──────────────────────────────────────────
  *
  * Selecting *Chargeback · billed* moves teammate / cost centre / surface / model
- * onto `provider_usage_fact` (`engine/billed-axis.ts`). Budget cannot follow
- * them, and the reason is structural rather than an unwritten adapter:
- *
- *   - `provider_usage_fact` has NO project column (mig 0118:54-79). Its grain is
- *     teammate · day · tool · model · cost_type.
- *   - The provider API has no concept of a project and never will
- *     (target-state-data-architecture.md §3: "A teammate's $500 day is one number
- *     on the bill. Splitting it across three projects requires knowing WHICH
- *     SESSION did what, and only OTel carries the session").
- *
- * So there are exactly two ways to put billed money on a budget axis: read the
- * tag that already exists, or invent a split. The second is the apportionment
- * §5 deleted — `f = min(1, T_otel/T_api)`, shares of `f·C`, largest-remainder
- * rounding — and a ratio-derived cell is indistinguishable at read time from a
- * figure the provider sent. This file takes the first.
+ * onto `provider_usage_fact` (`engine/billed-axis.ts`), which has NO project
+ * column (mig 0118:54-79). A project chargeback figure DOES exist: the bill
+ * split by tagged share, `v_finance_project_overlay` (mig 0146,
+ * docs/design/project-chargeback-lens.md). It is served on the project page;
+ * a chargeback lens on this axis is out of that design's scope, so this axis
+ * reads the tag that already exists on the attributed lane.
  *
  * ── WHAT "READ THE TAG THAT ALREADY EXISTS" ACTUALLY BUYS ───────────────────
  *
@@ -35,19 +26,15 @@
  * That leaves the partly-covered day (OTel saw some of it, the fill covers the
  * rest). Its OTel rows carry their own per-session tags and its fill row carries
  * one tag, so this axis still adds only figures that carry a claim — it never
- * splits a parent amount. Splitting a partly-covered day across budgets is #47,
- * DEFERRED by owner decision on 2026-08-02 with a state table required before
- * anyone builds it. Do not build it here.
+ * splits a parent amount. Splitting a partly-covered day's ATTRIBUTED amount
+ * across budgets is #47, DEFERRED by owner decision on 2026-08-02 with a state
+ * table required before anyone builds it. Do not build it here.
  *
  * ── THE ONE THING A READER MUST BE TOLD ─────────────────────────────────────
  *
  * These rows are ATTRIBUTED-lane money in both lanes, and the response says so
- * through `MeasureLanes`. That is not a hedge, it is the whole point: a reader
- * who flips to the billed lane and sees a budget breakdown is entitled to know
- * it did not come from the bill. The prototype's billed project pivot carried
- * the line "Provider sets the amount, OTel sets the split" — which IS the
- * coverage ratio, and is the one place the prototype and
- * target-state-data-architecture.md §5 contradict each other. §5 wins.
+ * through `MeasureLanes`: a reader who flips to the billed lane and sees a
+ * budget breakdown is entitled to know it did not come from the bill.
  *
  * Lane firewall (build-design §7(7)): reads the §A lane through the
  * `completeProjectAxisSpend` seam only — never `attribution_record`, never

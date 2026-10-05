@@ -166,6 +166,12 @@ const SERVER_PRODUCERS: Record<string, ProducerSpec> = {
     facts: 1,
     why: 'The project reports depth. It goes further than the others — an unconfirmed identity is never NAMED here, it folds into the remainder, so the rows still foot.',
   },
+  'server/reporting/project-chargeback.ts': {
+    disposition: 'shared-facts',
+    names: 4,
+    facts: 1,
+    why: "The project depth's chargeback lens. Its contributor rows go through the same splitProjectContribution as project-depth.ts, so an unconfirmed identity folds into the remainder and can_drill is the server's verdict.",
+  },
   'server/reporting/regional.ts': {
     disposition: 'shared-facts',
     names: 1,

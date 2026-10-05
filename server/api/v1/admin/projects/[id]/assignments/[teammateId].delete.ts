@@ -33,7 +33,7 @@ export default defineEventHandler(async (event) => {
     if (!proj) {
       throw createError({ statusCode: 404, statusMessage: 'Project not found' })
     }
-    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path })
+    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path }, tx)
 
     // End the open assignment range at now().
     const ended = await tx.execute<{ id: string }>(sql`

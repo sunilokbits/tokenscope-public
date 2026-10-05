@@ -52,10 +52,11 @@
  * measure (`MeasureLanes`).
  *
  * THE BUDGET AXIS IS THE EXCEPTION AND IT IS DECLARED, NOT HIDDEN. It answers
- * `attributed` in BOTH lenses, because `provider_usage_fact` has no project
- * column and the provider API has no concept of a project — see
- * `engine/budget-axis.ts` for why inventing one would be the apportionment
- * target-state-data-architecture.md §5 deleted.
+ * `attributed` in BOTH lenses: `provider_usage_fact` has no project column, so
+ * this engine has no billed project figure. The project chargeback split (the
+ * bill split by tagged share, `v_finance_project_overlay`) is served on the
+ * project page, not on this axis — docs/design/project-chargeback-lens.md and
+ * `engine/budget-axis.ts`.
  */
 import { sql } from 'drizzle-orm'
 import type { PostgresJsDatabase } from 'drizzle-orm/postgres-js'
@@ -287,12 +288,9 @@ export async function fetchDrivers(
   const window = sql`u.day >= ${range.startIso.slice(0, 10)}::date AND u.day < ${range.endIso.slice(0, 10)}::date`
 
   /*
-   * BUDGET — the shipped attribution, in BOTH lenses, and the ONE axis whose
-   * lane does not follow the toggle. `engine/budget-axis.ts` holds the whole
-   * argument: `provider_usage_fact` has no project column, the provider API has
-   * no concept of a project, and the alternative is the coverage ratio §5
-   * deleted. It is routed FIRST so no reader has to check whether the billed
-   * branch below might also claim it.
+   * BUDGET — attributed usage in BOTH lenses, the ONE axis whose lane does not
+   * follow the toggle (`engine/budget-axis.ts`). It is routed FIRST so no reader
+   * has to check whether the billed branch below might also claim it.
    */
   if (axis === 'project') {
     const budget = await fetchBudgetAxis(tx, clamp, range, lens)
@@ -301,10 +299,9 @@ export async function fetchDrivers(
       headlineUsd: budget.headlineUsd,
       lane: 'attributed',
       unallocatedUsd: budget.unallocatedUsd,
-      // NO provider bills at project grain, so this axis carries no chargeback
-      // at all — `providers` is empty and the gap names no provider. Saying so
-      // is what stops a reader who arrived through the chargeback toggle taking
-      // an attributed total for a cost of record.
+      // This axis carries no chargeback: `providers` is empty and the gap names
+      // no provider, so a reader who arrived through the chargeback toggle does
+      // not take an attributed total for a cost of record.
       ...(lens === 'chargeback'
         ? {
             chargebackCoverage: {
@@ -313,7 +310,7 @@ export async function fetchDrivers(
                 {
                   provider: null,
                   reason:
-                    'No provider bills at project grain, so the chargeback lane cannot answer this axis — these rows are attributed usage, not a cost of record.',
+                    "No provider bills at project grain and this axis does not split the bill, so these rows are attributed usage, not a cost of record. A project's chargeback figure is on its project page.",
                 },
               ],
             } satisfies ChargebackCoverage,

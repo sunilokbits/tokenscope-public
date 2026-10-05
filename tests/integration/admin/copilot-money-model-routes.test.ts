@@ -149,6 +149,24 @@ describe('RBAC + CSRF', () => {
 })
 
 describe('copilot-rate-plans route', () => {
+  it('403s a REGION admin on POST (S13: money-of-record for the whole estate); nothing is written', async () => {
+    const entId = await mkGithubEnterprise(`rp-s13-${randomUUID().slice(0, 8)}`)
+    const regionAdmin: Session = {
+      teammateId: finopsId,
+      email: 'cm-admin@x.test',
+      displayName: 'Region Admin',
+      role: 'admin',
+      regionId,
+      orgPath: 'cm.svc',
+    }
+    await expect(
+      ratePlansPost(ev({ method: 'POST', session: regionAdmin, params: { id: entId }, body: { validFrom: '2026-01-01', flatSeatPriceUsd: 1 } })),
+    ).rejects.toMatchObject({ statusCode: 403 })
+    const rows = await t.client<{ n: string }[]>`
+      SELECT COUNT(*)::text AS n FROM copilot_rate_plan WHERE provider_enterprise_id = ${entId}::uuid`
+    expect(Number(rows[0]!.n)).toBe(0)
+  })
+
   it('creates a rate plan and lists it back', async () => {
     const entId = await mkGithubEnterprise(`rp-ent-${randomUUID().slice(0, 8)}`)
     const created = (await ratePlansPost(

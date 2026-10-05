@@ -7,6 +7,22 @@ the publish tooling stamps the heading and a pre-PR gate reminds you to add
 the line — see the internal `tools/publish/README.md`, which is not part of
 the public mirror.)
 
+## v1.0.1 — 2026-10-02 (snapshot f86a61cf)
+
+- Project pages gain a chargeback toggle showing each project's share of the
+  actual vendor bill, split by tagged share, alongside the attributed view.
+- Security hardening:
+  - Estate-wide billing configuration and creating directory unit rules are now
+    platform-admin only.
+  - Every device enrolment mints a fresh device and never touches an existing one.
+  - Client registration has a hard cap and keys on the Front Door socket IP.
+  - The client plugins keep the emit token off the command line.
+- **Before upgrading:** a self-set `NUXT_ENROLLMENT_SECRET` weaker than the key
+  strength floor (32+ characters of random text; generate one with
+  `openssl rand -base64 48`) is now
+  ignored, so enrolment with it fails closed. The Azure templates do not set it.
+- Dependency updates, including undici, drizzle-orm, vue and nuxt-echarts.
+
 ## v1.0.0 — 2026-09-30 (snapshot 9f04b8d6)
 
 - **1.0.0, the first release.** Public releases are now versioned tags with

@@ -3,12 +3,13 @@
  * rule (mig 0089 + the mig 0112 unit target). HARD delete: rules are curated
  * CONFIG, not history.
  *
- * Authority mirrors the POST exactly, and for the same reason — a rule an admin
- * may create must be one they can undo, or the offer that created it is a trap:
+ * Creating a rule is platform-admin only (directory-region-rules.post.ts).
+ * Deleting stays region-scoped for unit rules, so a region admin can remove a
+ * unit rule that feeds their own region but cannot recreate it:
  *
  *   REGION rule  cross-region placement config → GLOBAL roles only.
- *   UNIT rule    places into ONE region's cost centre → `admin` with
- *                requireRegionScope over the unit's region, or a global role.
+ *   UNIT rule    `admin` with requireRegionScope over the unit's region, or a
+ *                global role.
  *
  * The row is READ AND LOCKED before the authorisation decision, because the
  * decision is about that row's target. Deleting first and asking afterwards would

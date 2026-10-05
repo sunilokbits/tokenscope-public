@@ -24,9 +24,9 @@
  * here would have silently lost the cost_owning_unit_code column.
  *
  * Region-scope: a region `admin` sees mapped orgs in their OWN region PLUS
- * every unmapped (region_id IS NULL) org — narrowing unmapped rows would hide
- * exactly the onboarding surface an admin is there to map. `platform-admin` /
- * `platform-admin` see every row. Matches diagnostics/index.get.ts's
+ * every unmapped (region_id IS NULL) org, read-only: writing an unmapped org is
+ * platform-admin only (orgs.post / [id].patch / [id].delete). `platform-admin`
+ * sees every row. Matches diagnostics/index.get.ts's
  * `session.role === 'admin'` shape; RLS is inert at runtime (owner
  * connection, no FORCE) so this in-query clamp is the live gate.
  */

@@ -23,13 +23,15 @@
  *     an enterprise-analytics org is rejected as a 400. The key is NEVER echoed.
  * UNIQUE (provider, lower(external_org_id)) → 409.
  *
- * RBAC: requireRole(admin) + assertSameOrigin. Audited.
+ * RBAC: requireRole(admin) + assertSameOrigin. Audited. An unmapped org
+ * (no regionId) or any credentialSecretName is platform-admin only.
  */
 import { defineEventHandler, createError, getRequestIP, getHeader } from 'h3'
 import { readValidated } from '../../../../utils/validated-body'
 import { sql } from 'drizzle-orm'
 import { z } from 'zod'
 import { requireRole, requireRegionScope } from '../../../../auth/rbac'
+import { isPlatformAdmin } from '../../../../../shared/auth/roles'
 import { assertSameOrigin } from '../../../../auth/csrf'
 import { withRequestRls } from '../../../../db/request-rls'
 import { recordAuditEvent } from '../../../../db/audit'
@@ -69,6 +71,19 @@ const Body = z.object({
   notes: z.string().max(2000).nullish(),
 })
 
+function platformAdminOnly(detail: string): never {
+  throw createError({
+    statusCode: 403,
+    statusMessage: 'Forbidden',
+    data: {
+      type: 'https://tokenscope.example.com/errors/forbidden',
+      title: 'Forbidden',
+      status: 403,
+      detail,
+    },
+  })
+}
+
 function badRequest(detail: string): never {
   throw createError({
     statusCode: 400,
@@ -89,10 +104,11 @@ export default defineEventHandler(async (event) => {
   const ip = getRequestIP(event, { xForwardedFor: true }) ?? null
   const ua = getHeader(event, 'user-agent') ?? null
 
-  // Region-scope: a region admin may only map a provider_org (ADR-0010 D4's
-  // Copilot license-org billing home) into their OWN region. Unmapped
-  // (regionId null) orgs skip this — that is the onboarding surface every
-  // region admin must keep access to (see the DELETE/LIST siblings).
+  // A region admin may only create an org mapped into their OWN region, with no credential.
+  if (!isPlatformAdmin(caller.role)) {
+    if (!body.regionId) platformAdminOnly('An unmapped provider org (no region) is estate-wide; only platform-admin may write it.')
+    if (body.credentialSecretName) platformAdminOnly('The credential namespace is deployment-wide; only platform-admin may assign credentialSecretName.')
+  }
   if (body.regionId) await requireRegionScope(event, body.regionId)
 
   const apiKind = body.apiKind ?? null

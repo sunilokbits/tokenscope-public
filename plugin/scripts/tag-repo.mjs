@@ -28,7 +28,7 @@ import { withinOwnInstall } from './plugin-runtime.mjs'
 // The single .gitignore-hygiene helper, shared with the Copilot forwarder.
 // Import is side-effect-free (that module main()-guards) and tag-repo.mjs is not
 // vendored into the standalone Copilot distribution — see ensureRepoTagGitignored.
-import { ensureGitignored } from './copilot-forwarder.mjs'
+import { ensureGitignored, isGitTracked } from './copilot-forwarder.mjs'
 
 // The client-neutral resolver/hasher (computeCodeHash, resolveRepoProjectCode)
 // was extracted into the syncable tokenscope-project.mjs (P0-2) so the Copilot
@@ -171,7 +171,7 @@ function resolveHelperPath(enrolment) {
  * S1 fix (4c) — resolve the git repository ROOT for `cwd`. writeRepoTag used
  * to write `<cwd>/.claude/settings.local.json` with no root check at all, so
  * running any plugin script from a SUBDIRECTORY planted a fresh
- * credential-bearing artefact there — deleting the one at the repo root
+ * device-config artefact there — deleting the one at the repo root
  * (or anywhere else) just made it come back on the next launch that happened
  * to run from that subdirectory.
  *
@@ -212,7 +212,7 @@ export function resolveRepoRoot(cwd) {
 
 /**
  * S1 fix (4) — idempotently ensure `<root>/.gitignore` ignores the repo tag, so
- * the credential-bearing `settings.local.json` this function writes can never be
+ * the device-config `settings.local.json` this function writes can never be
  * accidentally committed in a repo that doesn't already exclude `.claude/`.
  *
  * ONE implementation, shared with the Copilot forwarder. S1 originally landed a
@@ -240,36 +240,21 @@ function ensureRepoTagGitignored(root) {
 }
 
 /**
- * The telemetry-enabling keys Claude Code refuses from a project settings file
- * (verified on 2.1.283; the project tag in OTEL_RESOURCE_ATTRIBUTES still applies).
- * The repo tag leaves them out: they apply from the user-level file (per-key env
- * merge, measured on 2.1.232; superseded CLI versions are not supported).
- */
-export const REPO_REFUSED_TELEMETRY_KEYS = [
-  'CLAUDE_CODE_ENABLE_TELEMETRY',
-  'OTEL_LOGS_EXPORTER',
-  'OTEL_METRICS_EXPORTER',
-  'OTEL_TRACES_EXPORTER',
-  'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT',
-  'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
-]
-
-/**
  * Write the repo-local ./.claude/settings.local.json, overriding
  * OTEL_RESOURCE_ATTRIBUTES with the device session id + the repo's code_hash.
  *
  * SELF-HEALING (ADR-0006): the target is re-derived from the CURRENT global
- * enrolment on every call — the helper path, the full device env (endpoint,
- * exporter, bearer endpoint, OAuth/session credentials) and the instance id are
- * all copied from global *as they are now*, NOT a snapshot frozen at pin time.
- * That is what lets a plugin upgrade + re-enrol (which only touch global config)
- * reach a pinned repo on its next launch instead of leaving it on a stale,
- * silently-expiring credential.
+ * enrolment on every call — the helper path and the instance id are taken from
+ * global *as they are now*, NOT a snapshot frozen at pin time.
  *
- * The repo-local block copies the *current* global env each launch (helper
- * restated), except the telemetry-enabling keys in REPO_REFUSED_TELEMETRY_KEYS:
- * they apply from the user-level file, and from 2.1.283 Claude Code refuses them
- * from a project file anyway, warning at every startup (ADR-0006, amended).
+ * The env block is an ALLOWLIST: OTEL_RESOURCE_ATTRIBUTES only. Every other key
+ * applies from the user-level file (per-key env merge,
+ * docs/security-sprint/env-precedence-capture.md), and otel-headers-helper.sh
+ * reads its credential and destinations from the device store / user settings,
+ * never the repo file. `otelHeadersHelper` is a top-level setting, not env.
+ *
+ * Refuses (writes nothing, `trackedRefused: true`) when settings.local.json is
+ * git-tracked: overwriting it would publish device config on the next commit.
  *
  * Idempotent + change-detecting: computes the target settings, compares against
  * the existing file's content, and writes ONLY when they differ (so a true
@@ -310,9 +295,8 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
    * repo can ship `.claude` as a link to any directory the developer can write.
    * `mkdirSync(..., { recursive: true })` SUCCEEDS on an existing link target,
    * and every write below then lands there — including settings.local.json,
-   * which carries emit credentials. That is the same class as the `.gitignore`
-   * finding one function over, with a far more valuable payload: fixed text
-   * versus a credential.
+   * which carries the instance id and helper path. That is the same class as the
+   * `.gitignore` finding one function over.
    *
    * The file write itself is tmp+rename, which replaces the LINK rather than
    * following it, so the directory is the exposure.
@@ -330,6 +314,11 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   }
   mkdirSync(claudeDir, { recursive: true })
   const settingsPath = join(claudeDir, 'settings.local.json')
+
+  // The caller warns on `trackedRefused`.
+  if (isGitTracked(settingsPath)) {
+    return { settingsPath: null, changed: false, healed: false, instanceDrifted: false, trackedRefused: true }
+  }
 
   /*
    * THE FILE, not only the directory.
@@ -383,34 +372,8 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
     healed = (prevHelper != null && prevHelper !== helperPath) || instanceDrifted
   }
 
-  // Target env: the WHOLE current device env, with OTEL_RESOURCE_ATTRIBUTES
-  // overridden to carry the device sid + this repo's project.code_hash. We still
-  // defensively strip any legacy tokenscope.read credential keys, so a global
-  // config left over from a pre-cutover enrolment never copies that retired,
-  // higher-privilege identity token at rest into every repo (the read credential
-  // is gone — read now rides the MCP-client OAuth bearer, not settings env).
-  //
-  // S1 fix (4): ALSO strip the durable OAuth REFRESH token specifically — the
-  // long-lived credential a hostile repo could otherwise exfiltrate merely by
-  // being cloned and opened (the bearer endpoint and OAuth client id stay:
-  // the helper needs them). This walks the
-  // SAME sibling path the two deletes above already established for the
-  // retired read credential — one design, three keys.
-  // otel-headers-helper.sh reads the credential from the device's own 0700
-  // store (${STATE_DIR}/config.claude-code.json) before it ever looks at the
-  // environment, so a tagged repo's session still mints a bearer without this
-  // key — see that script's "Where the credential and destinations come from".
-  const deviceEnv = { ...(enrolment.env ?? {}) }
-  delete deviceEnv.TOKENSCOPE_READ_REFRESH_TOKEN
-  delete deviceEnv.TOKENSCOPE_READ_CLIENT_ID
-  delete deviceEnv.TOKENSCOPE_OAUTH_REFRESH_TOKEN
-  // Telemetry-ENABLING keys: Claude Code (2.1.283+) refuses them from a project
-  // settings file and warns at every startup; they apply from the user-level file.
-  for (const k of REPO_REFUSED_TELEMETRY_KEYS) delete deviceEnv[k]
-  // The removed OTLP forwarder's saved copy of the real endpoint: never repo-scoped.
-  delete deviceEnv.TOKENSCOPE_DCE_LOGS_ENDPOINT
+  // Allowlist, never a copy of the device env (SS-CP-2).
   const fullEnv = {
-    ...deviceEnv,
     OTEL_RESOURCE_ATTRIBUTES: buildRepoResourceAttrs(enrolment.sessionId, codeHash),
   }
   // REPLACE the repo env wholesale (not additive) so a key the current global
@@ -431,7 +394,7 @@ export function writeRepoTag({ cwd, enrolment, codeHash }) {
   // Write-temp-then-rename so a concurrent SessionStart hook (the per-HOST shared
   // ~/.claude means multiple `claude` launches can race the same repo file) never
   // reads a half-written file — rename is atomic on the same filesystem. The temp
-  // is created 0o600 (it carries the bearer/OAuth credentials); we also chmod the
+  // is created 0o600 (it carries device config); we also chmod the
   // landed file because writeFileSync's `mode` only applies on CREATE and a
   // pre-existing target could have looser perms. (LOW-B, mirrors
   // otel-headers-helper.sh's cache-write pattern.)

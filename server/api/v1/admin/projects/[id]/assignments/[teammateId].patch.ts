@@ -44,7 +44,7 @@ export default defineEventHandler(async (event) => {
     if (!proj) {
       throw createError({ statusCode: 404, statusMessage: 'Project not found' })
     }
-    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path })
+    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path }, tx)
 
     const updated = await tx.execute<{ id: string; prior_role: string }>(sql`
       UPDATE project_assignment pa

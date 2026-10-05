@@ -94,6 +94,7 @@ function stubGlobals(fetchState: { data: Ref<unknown>; pending: Ref<boolean> }) 
   vi.stubGlobal('usePersonalLens', () => ref<'usage' | 'chargeback'>('usage'))
   vi.stubGlobal('useRefreshOnVisible', () => {})
   stubServerClock()
+  vi.stubGlobal('usePersonalLens', () => ref<'usage' | 'chargeback'>('usage'))
   vi.stubGlobal('useFetch', (_url: string, _opts?: { query?: { value?: Record<string, unknown> } }) => {
     // Touch the reactive query the /usage page passes, like the real useFetch.
     void computed(() => _opts?.query?.value ?? {}).value

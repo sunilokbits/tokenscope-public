@@ -105,6 +105,7 @@ async function mountPage(data: Record<string, unknown>) {
     patch: vi.fn(),
   }))
   stubServerClock()
+  vi.stubGlobal('usePersonalLens', () => ref<'usage' | 'chargeback'>('usage'))
   vi.stubGlobal('useFetch', () => ({ data: ref(data), pending: ref(false), error: ref(null) }))
   const Parent = defineComponent({
     components: { ProjectPage },

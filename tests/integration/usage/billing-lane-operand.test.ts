@@ -331,15 +331,12 @@ describe('§B is untouched (§15)', () => {
      * The boundary this change must not cross. §B never reads OTel, so no
      * billing-lane value can move a charged figure.
      *
-     * Asserted on AMOUNTS, not on view SQL. "The view text does not mention
-     * billing_lane" would pass vacuously the moment someone joined the lane in
-     * through v_effective_spend — which v_finance_project_overlay genuinely
-     * reads, so the exposure is real rather than theoretical.
+     * Asserted on AMOUNTS, not on view SQL.
      *
-     * The overlay is included deliberately: design §8 anticipates a LATER
-     * increment that excludes self-billed from its tagged operand. That is
-     * explicitly not this change, and if someone lands it early this test says
-     * so instead of the split quietly shifting.
+     * v_finance_project_overlay is deliberately NOT in this snapshot: since mig
+     * 0146 its weights exclude self-billed OTel, so the lane steers how the bill
+     * splits across projects (never the bill total). That is pinned in
+     * tests/integration/reports/project-chargeback-lens.test.ts.
      */
     const DAY = '2026-07-20'
     await bill(DAY, '100.00', 1000)
@@ -354,11 +351,6 @@ describe('§B is untouched (§15)', () => {
         SELECT tool, charge_usd::text AS charge_usd FROM v_finance_chargeback_month
          WHERE cost_owning_unit_id = ${orgUnitId}::uuid AND period_month = '2026-07-01'::date
          ORDER BY tool`,
-      projectOverlay: await t.client<{ project_id: string | null; charge_usd: string }[]>`
-        SELECT project_id::text AS project_id, charge_usd::text AS charge_usd
-          FROM v_finance_project_overlay
-         WHERE teammate_id = ${teammateId}::uuid AND period_date = ${DAY}::date
-         ORDER BY project_id NULLS LAST`,
     })
 
     const before = await snapshot()
@@ -367,7 +359,6 @@ describe('§B is untouched (§15)', () => {
     expect(before.billChargeback).toHaveLength(1)
     expect(Number(before.billChargeback[0]!.bill_usd)).toBe(100)
     expect(before.chargebackMonth.some((r) => Number(r.charge_usd) > 0)).toBe(true)
-    expect(before.projectOverlay.some((r) => r.project_id !== null && Number(r.charge_usd) > 0)).toBe(true)
 
     // Flip BOTH lanes — the most aggressive reclassification possible on this day.
     await t.client`

@@ -51,7 +51,7 @@ export default defineEventHandler(async (event) => {
     if (!proj) {
       throw createError({ statusCode: 404, statusMessage: 'Project not found' })
     }
-    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path })
+    await assertProjectScope(event, { regionId: proj.region_id, couPath: proj.cou_path }, tx)
 
     // Reject an overlapping baseline pool up front for a clean 409 (the
     // gist EXCLUDE would otherwise raise a raw constraint error).

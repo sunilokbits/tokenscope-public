@@ -18,6 +18,7 @@ import {
   projectBillabilityWarning,
   buildHookOutput,
   staleInstancePinWarning,
+  trackedRepoTagWarning,
 } from '../../../plugin/hooks/session-start.mjs'
 import { repoTagEnv } from '../../../plugin/scripts/plugin-runtime.mjs'
 
@@ -187,5 +188,13 @@ describe('staleInstancePinWarning — the superseded instance pin (2026-09-01 in
   it('never warns on a truthy-but-not-true instanceDrifted (fail SILENT, never cry wolf)', () => {
     expect(staleInstancePinWarning({ instanceDrifted: 'yes' } as never)).toBeNull()
     expect(staleInstancePinWarning({ instanceDrifted: 1 } as never)).toBeNull()
+  })
+})
+
+describe('trackedRepoTagWarning — the repo tag refused a git-tracked file (SS-CP-2)', () => {
+  it('warns only on trackedRefused', () => {
+    expect(trackedRepoTagWarning({ trackedRefused: true })).toContain('tracked by git')
+    expect(trackedRepoTagWarning({ settingsPath: null, changed: false, healed: false, instanceDrifted: false })).toBeNull()
+    expect(trackedRepoTagWarning(null)).toBeNull()
   })
 })
