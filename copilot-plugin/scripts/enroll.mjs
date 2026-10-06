@@ -101,7 +101,7 @@ const ENROLL_TIMEOUT_MS = 4000
 // The plugin ships from a specific deployment's marketplace, so it implies its
 // server; TOKENSCOPE_API_BASE overrides for local dev / another instance. A public
 // hostname, not a secret.
-const DEFAULT_API_BASE = 'https://tokenscope.example.com'
+const DEFAULT_API_BASE = 'https://ca-tscope-sandbox-wus3.wittydune-91621c23.westus3.azurecontainerapps.io'
 
 /**
  * Resolve the API base (explicit arg > discovered registration > baked default),

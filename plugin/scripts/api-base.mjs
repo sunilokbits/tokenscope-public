@@ -34,7 +34,7 @@
  */
 import { assertSafeEndpoint, unsafeEndpointError } from './endpoint-guard.mjs'
 
-export const DEFAULT_API_BASE = 'https://tokenscope.example.com'
+export const DEFAULT_API_BASE = 'https://ca-tscope-sandbox-wus3.wittydune-91621c23.westus3.azurecontainerapps.io'
 
 /**
  * Is this base one only somebody already ON the machine could be served by?
