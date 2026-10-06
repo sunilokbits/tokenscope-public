@@ -101,6 +101,15 @@ set -eu
 # to, so reaching it already requires executing code on this machine. Parsed
 # below with the other arguments; applied here as an ordinary PATH prefix.
 TRUSTED_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Git for Windows (the shell Claude Code uses on Windows) has no curl in its
+# /usr/bin: curl is /mingw64/bin/curl.exe, part of the same Git install. Without
+# it every refresh fails as "HTTP 000" (curl: command not found) and telemetry is
+# silently dropped. APPEND it, so the POSIX directories still win; it is the
+# install's own directory, not anything a settings merge can contribute. uname is
+# called by absolute path because PATH is not trusted yet.
+case "$(/usr/bin/uname -s 2>/dev/null)" in
+  MINGW* | MSYS* | CYGWIN*) TRUSTED_PATH="${TRUSTED_PATH}:/mingw64/bin" ;;
+esac
 # REPLACE, do not prepend. Prepending left every inherited directory reachable as
 # a FALLBACK: a tool absent from the trusted list still resolved through the
 # repo-supplied tail. `getent` is the live example — it does not exist on macOS,
