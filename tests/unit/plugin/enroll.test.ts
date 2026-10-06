@@ -20,6 +20,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir, hostname } from 'node:os'
 import { join } from 'node:path'
+import { DEFAULT_API_BASE } from '../../../plugin/scripts/api-base.mjs'
 import { execFileSync } from 'node:child_process'
 
 import {
@@ -277,7 +278,7 @@ describe('enrollIfNeeded — decision logic', () => {
       })
       expect(post).toHaveBeenCalledTimes(1)
       const [url, body] = post.mock.calls[0]
-      expect(url).toBe('https://tokenscope.example.com/api/v1/setup/enroll')
+      expect(url).toBe(`${DEFAULT_API_BASE}/api/v1/setup/enroll`)
       expect(url).not.toContain('attacker')
       // Name what would have leaked, so a future reader sees the stake.
       expect(body.enrollment_secret).toBe('BUNDLED_SECRET')
