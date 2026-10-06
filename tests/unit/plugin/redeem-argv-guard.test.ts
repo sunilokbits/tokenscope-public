@@ -41,6 +41,9 @@ const { assertAllowedApiBase, acceptApiBaseArg, assertConfinedPath, flagValue, a
 const { realHome } = await import('../../../plugin/scripts/real-home.mjs')
 // @ts-ignore — mjs import resolved by Vitest
 const { DEFAULT_API_BASE } = await import('../../../plugin/scripts/api-base.mjs')
+// Near-miss cases are built from the baked host so they stay meaningful in a fork
+// that points the plugin at its own deployment.
+const BAKED_HOST = new URL(DEFAULT_API_BASE).host
 // @ts-ignore — mjs import resolved by Vitest
 const { parseArgs: parseClaudeArgs } = await import('../../../plugin/scripts/claude-redeem.mjs')
 // @ts-ignore — mjs import resolved by Vitest
@@ -104,16 +107,16 @@ describe('assertAllowedApiBase — argv may select a known origin, never introdu
       // a homoglyph host punycodes to a different origin
       'https://tokenscope-dev.insight.cоm',
       // a different port is a different endpoint
-      'https://tokenscope.example.com:8443',
+      `https://${BAKED_HOST}:8443`,
       // a subdomain/suffix of an allowed host is not that host
-      'https://tokenscope.example.com.evil.example.com',
-      'https://evil.tokenscope.example.com',
+      `https://${BAKED_HOST}.evil.example.com`,
+      `https://evil.${BAKED_HOST}`,
       // plaintext off-box, and a non-http(s) scheme on loopback
-      'http://tokenscope.example.com',
+      `http://${BAKED_HOST}`,
       'ftp://127.0.0.1:3450',
       // not a URL at all / would read as a flag
       '--settings-path',
-      'tokenscope.example.com',
+      BAKED_HOST,
       '',
     ]
     for (const value of rejected) {
@@ -125,9 +128,7 @@ describe('assertAllowedApiBase — argv may select a known origin, never introdu
     // Trailing slash, default port, host casing and any path/query are all
     // normalised away — the POST target is built from the ORIGIN, so nothing a
     // caller appended to the flag survives into the URL.
-    expect(assertAllowedApiBase('https://tokenscope.example.com/', { allowed })).toBe(
-      DEFAULT_API_BASE,
-    )
+    expect(assertAllowedApiBase(`${DEFAULT_API_BASE}/`, { allowed })).toBe(DEFAULT_API_BASE)
     expect(assertAllowedApiBase(`${DEFAULT_API_BASE}:443`, { allowed })).toBe(DEFAULT_API_BASE)
     expect(assertAllowedApiBase(`${DEFAULT_API_BASE}/evil/path?q=1#f`, { allowed })).toBe(
       DEFAULT_API_BASE,

@@ -23,6 +23,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync, readdirSync } from 'node:fs'
 import { tmpdir, hostname } from 'node:os'
 import { join } from 'node:path'
+// The baked host (copilot-plugin/scripts/enroll.mjs must agree: check:copilot-plugin-sync).
+import { DEFAULT_API_BASE } from '../../../plugin/scripts/api-base.mjs'
 import { execFileSync } from 'node:child_process'
 
 import {
@@ -138,7 +140,7 @@ describe('resolveApiBase', () => {
     expect(resolveApiBase('https://ts.example.com/', { discovered: null })).toBe(
       'https://ts.example.com',
     )
-    expect(resolveApiBase(null, { discovered: null })).toBe('https://tokenscope.example.com')
+    expect(resolveApiBase(null, { discovered: null })).toBe(DEFAULT_API_BASE)
   })
 
   it('prefers a registered MCP origin over the baked default', () => {
@@ -162,7 +164,7 @@ describe('resolveApiBase', () => {
     const saved = process.env.TOKENSCOPE_API_BASE
     process.env.TOKENSCOPE_API_BASE = 'https://attacker.example.com'
     try {
-      expect(resolveApiBase(null, { discovered: null })).toBe('https://tokenscope.example.com')
+      expect(resolveApiBase(null, { discovered: null })).toBe(DEFAULT_API_BASE)
       expect(resolveApiBase(null, { discovered: 'https://ts-own.example.com' })).toBe(
         'https://ts-own.example.com',
       )
