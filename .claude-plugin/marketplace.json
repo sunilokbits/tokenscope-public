@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "TokenScope plugin marketplace. At the repo root so `claude plugin marketplace add <owner>/<repo>` resolves it; add with `--sparse .claude-plugin plugin` to sparse-checkout only those directories. The plugins talk to the deployment whose host is baked into them: see plugin/README.md, Point the plugins at your deployment.",
-    "version": "0.1.43"
+    "version": "0.1.44"
   },
   "plugins": [
     {
       "name": "tokenscope",
       "description": "Attribute Claude Code token spend to projects via the TokenScope attestation API.",
-      "version": "0.1.43",
+      "version": "0.1.44",
       "author": {
         "name": "Insight Services APAC"
       },
@@ -20,7 +20,7 @@
     {
       "name": "tokenscope-copilot",
       "description": "Attribute GitHub Copilot CLI token spend to projects via the TokenScope attribution platform.",
-      "version": "0.1.21",
+      "version": "0.1.22",
       "author": {
         "name": "Insight Services APAC"
       },

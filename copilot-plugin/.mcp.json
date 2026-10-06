@@ -3,7 +3,7 @@
   "mcpServers": {
     "tokenscope": {
       "type": "http",
-      "url": "https://tokenscope.example.com/api/v1/mcp"
+      "url": "https://ca-tscope-sandbox-wus3.wittydune-91621c23.westus3.azurecontainerapps.io/api/v1/mcp"
     }
   }
 }
