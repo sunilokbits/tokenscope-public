@@ -86,7 +86,6 @@ describe('check-docs-references', () => {
     )
     const m = messages().join('\n')
     expect(m).toContain('credential name "insight" maps to no key')
-    expect(m).toContain('credential name "enterprise-nfr" maps to no key')
     expect(m).not.toContain('"enterprise-nfr" maps')
   })
 
